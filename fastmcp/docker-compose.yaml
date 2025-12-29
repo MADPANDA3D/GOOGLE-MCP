@@ -1,0 +1,10 @@
+services:
+  google-mcp:
+    build: .
+    container_name: google-mcp
+    env_file:
+      - .env
+    volumes:
+      - ./.google:/app/.google
+    ports:
+      - "8086:8086"
