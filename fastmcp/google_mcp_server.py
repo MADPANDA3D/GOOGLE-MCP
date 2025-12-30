@@ -25,6 +25,8 @@ DEFAULT_SCOPES = (
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/calendar",
 )
+DEFAULT_DRIVE_FIELDS = "files(id,name,mimeType,modifiedTime,size,parents),nextPageToken"
+DEFAULT_DRIVE_GET_FIELDS = "id,name,mimeType,modifiedTime,size,parents"
 
 MCP_HTTP_PORT = int(os.getenv("MCP_HTTP_PORT", "8086"))
 MCP_BIND_ADDRESS = os.getenv("MCP_BIND_ADDRESS", "0.0.0.0")
@@ -198,17 +200,19 @@ async def google_raw_request(
 async def drive_list_files(
     query: str = "",
     page_size: int = 100,
-    fields: str = "files(id,name,mimeType,modifiedTime,size,parents),nextPageToken",
+    fields: str = "",
     order_by: str = "",
 ) -> str:
     """List files in Google Drive using the v3 API."""
+
+    effective_fields = fields or DEFAULT_DRIVE_FIELDS
 
     def _list_files():
         service = client.build_service("drive", "v3")
         request = service.files().list(
             q=query or None,
             pageSize=page_size,
-            fields=fields,
+            fields=effective_fields,
             orderBy=order_by or None,
         )
         return request.execute()
@@ -220,16 +224,18 @@ async def drive_list_files(
 @mcp.tool()
 async def drive_get_file(
     file_id: str,
-    fields: str = "id,name,mimeType,modifiedTime,size,parents",
+    fields: str = "",
 ) -> str:
     """Get Drive file metadata."""
 
     if not file_id:
         raise ValueError("file_id cannot be empty")
 
+    effective_fields = fields or DEFAULT_DRIVE_GET_FIELDS
+
     def _get_file():
         service = client.build_service("drive", "v3")
-        request = service.files().get(fileId=file_id, fields=fields)
+        request = service.files().get(fileId=file_id, fields=effective_fields)
         return request.execute()
 
     result = await run_blocking(_get_file)
