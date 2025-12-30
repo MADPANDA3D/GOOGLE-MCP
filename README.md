@@ -63,8 +63,10 @@ GOOGLE_SCOPES=... (same as above)
 ### 4) Run the server
 
 ```bash
-pip install -r fastmcp/requirements.txt
-python fastmcp/google_mcp_server.py
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r fastmcp/requirements.txt
+python3 fastmcp/google_mcp_server.py
 ```
 
 Or with Docker:
@@ -72,6 +74,16 @@ Or with Docker:
 ```bash
 docker compose -f fastmcp/docker-compose.yaml up --build
 ```
+
+### VPS notes (Ubuntu/Debian)
+
+If you see `externally-managed-environment`, install venv support first:
+
+```bash
+apt-get update && apt-get install -y python3.12-venv
+```
+
+Then create the virtual environment as shown above.
 
 ## Tools (curated)
 
