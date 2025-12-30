@@ -488,7 +488,7 @@ async def sheets_get_values(spreadsheet_id: str, range_a1: str) -> str:
 async def sheets_update_values(
     spreadsheet_id: str,
     range_a1: str,
-    values: list[list[Any]],
+    values: list[list[str | int | float | bool | None]],
     value_input_option: str = "RAW",
 ) -> str:
     """Write values to a Google Sheet range."""
