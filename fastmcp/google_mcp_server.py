@@ -4,6 +4,7 @@ import io
 import json
 import os
 import threading
+from email.message import EmailMessage
 from typing import Any
 
 from google.auth.transport.requests import AuthorizedSession, Request
@@ -20,6 +21,9 @@ DEFAULT_SCOPES = (
     "https://www.googleapis.com/auth/documents",
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/presentations",
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/calendar",
 )
 
 MCP_HTTP_PORT = int(os.getenv("MCP_HTTP_PORT", "8086"))
@@ -109,6 +113,38 @@ def normalize_url(url: str) -> str:
 
 def json_dumps(data: Any) -> str:
     return json.dumps(data, indent=2, sort_keys=True)
+
+
+def build_email_message(
+    to: str,
+    subject: str,
+    body: str,
+    cc: str = "",
+    bcc: str = "",
+    reply_to: str = "",
+    from_alias: str = "",
+    is_html: bool = False,
+) -> EmailMessage:
+    message = EmailMessage()
+    message["To"] = to
+    message["Subject"] = subject
+    if cc:
+        message["Cc"] = cc
+    if bcc:
+        message["Bcc"] = bcc
+    if reply_to:
+        message["Reply-To"] = reply_to
+    if from_alias:
+        message["From"] = from_alias
+    if is_html:
+        message.add_alternative(body, subtype="html")
+    else:
+        message.set_content(body)
+    return message
+
+
+def encode_email_message(message: EmailMessage) -> str:
+    return base64.urlsafe_b64encode(message.as_bytes()).decode("ascii")
 
 
 async def run_blocking(func, *args, **kwargs):
@@ -547,6 +583,570 @@ async def slides_replace_text(
         return request.execute()
 
     result = await run_blocking(_replace)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def gmail_list_labels() -> str:
+    """List Gmail labels for the authenticated user."""
+
+    def _list_labels():
+        service = client.build_service("gmail", "v1")
+        request = service.users().labels().list(userId="me")
+        return request.execute()
+
+    result = await run_blocking(_list_labels)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def gmail_create_label(
+    name: str,
+    label_list_visibility: str = "labelShow",
+    message_list_visibility: str = "show",
+) -> str:
+    """Create a Gmail label."""
+
+    if not name:
+        raise ValueError("name cannot be empty")
+
+    def _create_label():
+        service = client.build_service("gmail", "v1")
+        body = {
+            "name": name,
+            "labelListVisibility": label_list_visibility,
+            "messageListVisibility": message_list_visibility,
+        }
+        request = service.users().labels().create(userId="me", body=body)
+        return request.execute()
+
+    result = await run_blocking(_create_label)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def gmail_delete_label(label_id: str) -> str:
+    """Delete a Gmail label."""
+
+    if not label_id:
+        raise ValueError("label_id cannot be empty")
+
+    def _delete_label():
+        service = client.build_service("gmail", "v1")
+        request = service.users().labels().delete(userId="me", id=label_id)
+        return request.execute()
+
+    result = await run_blocking(_delete_label)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def gmail_list_messages(
+    query: str = "",
+    label_ids: list[str] | None = None,
+    max_results: int = 100,
+    include_spam_trash: bool = False,
+) -> str:
+    """List Gmail messages matching a query or labels."""
+
+    def _list_messages():
+        service = client.build_service("gmail", "v1")
+        request = service.users().messages().list(
+            userId="me",
+            q=query or None,
+            labelIds=label_ids or None,
+            maxResults=max_results,
+            includeSpamTrash=include_spam_trash,
+        )
+        return request.execute()
+
+    result = await run_blocking(_list_messages)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def gmail_get_message(message_id: str, format: str = "full") -> str:
+    """Get a Gmail message by ID."""
+
+    if not message_id:
+        raise ValueError("message_id cannot be empty")
+
+    def _get_message():
+        service = client.build_service("gmail", "v1")
+        request = service.users().messages().get(
+            userId="me",
+            id=message_id,
+            format=format,
+        )
+        return request.execute()
+
+    result = await run_blocking(_get_message)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def gmail_list_threads(
+    query: str = "",
+    label_ids: list[str] | None = None,
+    max_results: int = 50,
+) -> str:
+    """List Gmail threads."""
+
+    def _list_threads():
+        service = client.build_service("gmail", "v1")
+        request = service.users().threads().list(
+            userId="me",
+            q=query or None,
+            labelIds=label_ids or None,
+            maxResults=max_results,
+        )
+        return request.execute()
+
+    result = await run_blocking(_list_threads)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def gmail_get_thread(thread_id: str, format: str = "full") -> str:
+    """Get a Gmail thread by ID."""
+
+    if not thread_id:
+        raise ValueError("thread_id cannot be empty")
+
+    def _get_thread():
+        service = client.build_service("gmail", "v1")
+        request = service.users().threads().get(
+            userId="me",
+            id=thread_id,
+            format=format,
+        )
+        return request.execute()
+
+    result = await run_blocking(_get_thread)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def gmail_send_message(
+    to: str,
+    subject: str,
+    body: str,
+    cc: str = "",
+    bcc: str = "",
+    reply_to: str = "",
+    from_alias: str = "",
+    thread_id: str = "",
+    is_html: bool = False,
+) -> str:
+    """Send a Gmail message with basic headers."""
+
+    if not to:
+        raise ValueError("to cannot be empty")
+    if not subject:
+        raise ValueError("subject cannot be empty")
+    if body is None:
+        raise ValueError("body cannot be empty")
+
+    def _send():
+        service = client.build_service("gmail", "v1")
+        message = build_email_message(
+            to=to,
+            subject=subject,
+            body=body,
+            cc=cc,
+            bcc=bcc,
+            reply_to=reply_to,
+            from_alias=from_alias,
+            is_html=is_html,
+        )
+        raw = encode_email_message(message)
+        payload: dict[str, Any] = {"raw": raw}
+        if thread_id:
+            payload["threadId"] = thread_id
+        request = service.users().messages().send(userId="me", body=payload)
+        return request.execute()
+
+    result = await run_blocking(_send)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def gmail_send_raw_message(raw_base64: str, thread_id: str = "") -> str:
+    """Send a Gmail message using a base64url-encoded raw MIME message."""
+
+    if not raw_base64:
+        raise ValueError("raw_base64 cannot be empty")
+
+    def _send_raw():
+        service = client.build_service("gmail", "v1")
+        payload: dict[str, Any] = {"raw": raw_base64}
+        if thread_id:
+            payload["threadId"] = thread_id
+        request = service.users().messages().send(userId="me", body=payload)
+        return request.execute()
+
+    result = await run_blocking(_send_raw)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def gmail_create_draft(
+    to: str,
+    subject: str,
+    body: str,
+    cc: str = "",
+    bcc: str = "",
+    reply_to: str = "",
+    from_alias: str = "",
+    is_html: bool = False,
+) -> str:
+    """Create a Gmail draft."""
+
+    if not to:
+        raise ValueError("to cannot be empty")
+    if not subject:
+        raise ValueError("subject cannot be empty")
+    if body is None:
+        raise ValueError("body cannot be empty")
+
+    def _create_draft():
+        service = client.build_service("gmail", "v1")
+        message = build_email_message(
+            to=to,
+            subject=subject,
+            body=body,
+            cc=cc,
+            bcc=bcc,
+            reply_to=reply_to,
+            from_alias=from_alias,
+            is_html=is_html,
+        )
+        raw = encode_email_message(message)
+        request = service.users().drafts().create(
+            userId="me",
+            body={"message": {"raw": raw}},
+        )
+        return request.execute()
+
+    result = await run_blocking(_create_draft)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def gmail_send_draft(draft_id: str) -> str:
+    """Send an existing Gmail draft."""
+
+    if not draft_id:
+        raise ValueError("draft_id cannot be empty")
+
+    def _send_draft():
+        service = client.build_service("gmail", "v1")
+        request = service.users().drafts().send(userId="me", body={"id": draft_id})
+        return request.execute()
+
+    result = await run_blocking(_send_draft)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def gmail_modify_message_labels(
+    message_id: str,
+    add_label_ids: list[str] | None = None,
+    remove_label_ids: list[str] | None = None,
+) -> str:
+    """Add or remove labels on a Gmail message."""
+
+    if not message_id:
+        raise ValueError("message_id cannot be empty")
+
+    def _modify():
+        service = client.build_service("gmail", "v1")
+        body = {
+            "addLabelIds": add_label_ids or [],
+            "removeLabelIds": remove_label_ids or [],
+        }
+        request = service.users().messages().modify(
+            userId="me",
+            id=message_id,
+            body=body,
+        )
+        return request.execute()
+
+    result = await run_blocking(_modify)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def gmail_trash_message(message_id: str) -> str:
+    """Move a Gmail message to trash."""
+
+    if not message_id:
+        raise ValueError("message_id cannot be empty")
+
+    def _trash():
+        service = client.build_service("gmail", "v1")
+        request = service.users().messages().trash(userId="me", id=message_id)
+        return request.execute()
+
+    result = await run_blocking(_trash)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def gmail_untrash_message(message_id: str) -> str:
+    """Restore a Gmail message from trash."""
+
+    if not message_id:
+        raise ValueError("message_id cannot be empty")
+
+    def _untrash():
+        service = client.build_service("gmail", "v1")
+        request = service.users().messages().untrash(userId="me", id=message_id)
+        return request.execute()
+
+    result = await run_blocking(_untrash)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def gmail_delete_message(message_id: str) -> str:
+    """Permanently delete a Gmail message."""
+
+    if not message_id:
+        raise ValueError("message_id cannot be empty")
+
+    def _delete():
+        service = client.build_service("gmail", "v1")
+        request = service.users().messages().delete(userId="me", id=message_id)
+        return request.execute()
+
+    result = await run_blocking(_delete)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def calendar_list_calendars() -> str:
+    """List calendars visible to the authenticated user."""
+
+    def _list_calendars():
+        service = client.build_service("calendar", "v3")
+        request = service.calendarList().list()
+        return request.execute()
+
+    result = await run_blocking(_list_calendars)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def calendar_get_calendar(calendar_id: str) -> str:
+    """Get calendar metadata by ID."""
+
+    if not calendar_id:
+        raise ValueError("calendar_id cannot be empty")
+
+    def _get_calendar():
+        service = client.build_service("calendar", "v3")
+        request = service.calendars().get(calendarId=calendar_id)
+        return request.execute()
+
+    result = await run_blocking(_get_calendar)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def calendar_create_calendar(summary: str, description: str = "", time_zone: str = "") -> str:
+    """Create a new calendar."""
+
+    if not summary:
+        raise ValueError("summary cannot be empty")
+
+    def _create_calendar():
+        service = client.build_service("calendar", "v3")
+        body: dict[str, Any] = {"summary": summary}
+        if description:
+            body["description"] = description
+        if time_zone:
+            body["timeZone"] = time_zone
+        request = service.calendars().insert(body=body)
+        return request.execute()
+
+    result = await run_blocking(_create_calendar)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def calendar_delete_calendar(calendar_id: str) -> str:
+    """Delete a calendar."""
+
+    if not calendar_id:
+        raise ValueError("calendar_id cannot be empty")
+
+    def _delete_calendar():
+        service = client.build_service("calendar", "v3")
+        request = service.calendars().delete(calendarId=calendar_id)
+        return request.execute()
+
+    result = await run_blocking(_delete_calendar)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def calendar_list_events(
+    calendar_id: str = "primary",
+    time_min: str = "",
+    time_max: str = "",
+    query: str = "",
+    max_results: int = 100,
+    single_events: bool = True,
+    order_by: str = "startTime",
+) -> str:
+    """List events in a calendar."""
+
+    def _list_events():
+        service = client.build_service("calendar", "v3")
+        request = service.events().list(
+            calendarId=calendar_id,
+            timeMin=time_min or None,
+            timeMax=time_max or None,
+            q=query or None,
+            maxResults=max_results,
+            singleEvents=single_events,
+            orderBy=order_by or None,
+        )
+        return request.execute()
+
+    result = await run_blocking(_list_events)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def calendar_get_event(calendar_id: str, event_id: str) -> str:
+    """Get a calendar event by ID."""
+
+    if not calendar_id:
+        raise ValueError("calendar_id cannot be empty")
+    if not event_id:
+        raise ValueError("event_id cannot be empty")
+
+    def _get_event():
+        service = client.build_service("calendar", "v3")
+        request = service.events().get(calendarId=calendar_id, eventId=event_id)
+        return request.execute()
+
+    result = await run_blocking(_get_event)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def calendar_create_event(
+    calendar_id: str,
+    summary: str,
+    start_iso: str,
+    end_iso: str,
+    time_zone: str = "UTC",
+    description: str = "",
+    location: str = "",
+    attendees: list[str] | None = None,
+    all_day: bool = False,
+) -> str:
+    """Create a calendar event."""
+
+    if not calendar_id:
+        raise ValueError("calendar_id cannot be empty")
+    if not summary:
+        raise ValueError("summary cannot be empty")
+    if not start_iso or not end_iso:
+        raise ValueError("start_iso and end_iso are required")
+
+    def _create_event():
+        service = client.build_service("calendar", "v3")
+        event: dict[str, Any] = {"summary": summary}
+        if description:
+            event["description"] = description
+        if location:
+            event["location"] = location
+        if all_day:
+            event["start"] = {"date": start_iso}
+            event["end"] = {"date": end_iso}
+        else:
+            event["start"] = {"dateTime": start_iso, "timeZone": time_zone}
+            event["end"] = {"dateTime": end_iso, "timeZone": time_zone}
+        if attendees:
+            event["attendees"] = [{"email": email} for email in attendees]
+        request = service.events().insert(calendarId=calendar_id, body=event)
+        return request.execute()
+
+    result = await run_blocking(_create_event)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def calendar_update_event(
+    calendar_id: str,
+    event_id: str,
+    event_patch: dict[str, Any],
+    send_updates: str = "all",
+) -> str:
+    """Patch a calendar event with a partial update."""
+
+    if not calendar_id:
+        raise ValueError("calendar_id cannot be empty")
+    if not event_id:
+        raise ValueError("event_id cannot be empty")
+    if event_patch is None:
+        raise ValueError("event_patch cannot be empty")
+
+    def _update_event():
+        service = client.build_service("calendar", "v3")
+        request = service.events().patch(
+            calendarId=calendar_id,
+            eventId=event_id,
+            body=event_patch,
+            sendUpdates=send_updates or None,
+        )
+        return request.execute()
+
+    result = await run_blocking(_update_event)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def calendar_delete_event(calendar_id: str, event_id: str, send_updates: str = "all") -> str:
+    """Delete a calendar event."""
+
+    if not calendar_id:
+        raise ValueError("calendar_id cannot be empty")
+    if not event_id:
+        raise ValueError("event_id cannot be empty")
+
+    def _delete_event():
+        service = client.build_service("calendar", "v3")
+        request = service.events().delete(
+            calendarId=calendar_id,
+            eventId=event_id,
+            sendUpdates=send_updates or None,
+        )
+        return request.execute()
+
+    result = await run_blocking(_delete_event)
+    return json_dumps(result)
+
+
+@mcp.tool()
+async def calendar_quick_add(calendar_id: str, text: str) -> str:
+    """Create an event from a natural language text string."""
+
+    if not calendar_id:
+        raise ValueError("calendar_id cannot be empty")
+    if not text:
+        raise ValueError("text cannot be empty")
+
+    def _quick_add():
+        service = client.build_service("calendar", "v3")
+        request = service.events().quickAdd(calendarId=calendar_id, text=text)
+        return request.execute()
+
+    result = await run_blocking(_quick_add)
     return json_dumps(result)
 
 

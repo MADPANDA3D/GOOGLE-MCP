@@ -12,7 +12,7 @@ ENV MCP_HTTP_PORT="8086"
 ENV MCP_BIND_ADDRESS="0.0.0.0"
 ENV GOOGLE_CREDENTIALS_PATH="/app/.google/credentials.json"
 ENV GOOGLE_TOKEN_PATH="/app/.google/token.json"
-ENV GOOGLE_SCOPES="https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/presentations"
+ENV GOOGLE_SCOPES="https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/presentations https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/calendar"
 
 EXPOSE 8086
 

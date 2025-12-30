@@ -19,6 +19,8 @@ Unified Google Workspace MCP server for Drive, Docs, Sheets, and Slides.
    - Google Docs API
    - Google Sheets API
    - Google Slides API
+   - Gmail API
+   - Google Calendar API
 3. Configure the OAuth consent screen.
 4. Create an OAuth client ID (Desktop app) and download `credentials.json`.
 
@@ -33,7 +35,7 @@ fastmcp/.google/credentials.json
 Run this on your local machine (the one with a browser):
 
 ```bash
-export GOOGLE_SCOPES="https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/presentations"
+export GOOGLE_SCOPES="https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/presentations https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/calendar"
 python fastmcp/google_auth_local.py \
   --credentials fastmcp/.google/credentials.json \
   --token fastmcp/.google/token.json \
@@ -59,6 +61,9 @@ GOOGLE_CREDENTIALS_PATH=fastmcp/.google/credentials.json
 GOOGLE_TOKEN_PATH=fastmcp/.google/token.json
 GOOGLE_SCOPES=... (same as above)
 ```
+
+If you add or change scopes later, rerun `google_auth_local.py` and copy the new
+`token.json` to the VPS.
 
 ### 4) Run the server
 
@@ -120,6 +125,31 @@ Then create the virtual environment as shown above.
 - `slides_create_presentation`
 - `slides_get_presentation`
 - `slides_replace_text`
+- `gmail_list_labels`
+- `gmail_create_label`
+- `gmail_delete_label`
+- `gmail_list_messages`
+- `gmail_get_message`
+- `gmail_list_threads`
+- `gmail_get_thread`
+- `gmail_send_message`
+- `gmail_send_raw_message`
+- `gmail_create_draft`
+- `gmail_send_draft`
+- `gmail_modify_message_labels`
+- `gmail_trash_message`
+- `gmail_untrash_message`
+- `gmail_delete_message`
+- `calendar_list_calendars`
+- `calendar_get_calendar`
+- `calendar_create_calendar`
+- `calendar_delete_calendar`
+- `calendar_list_events`
+- `calendar_get_event`
+- `calendar_create_event`
+- `calendar_update_event`
+- `calendar_delete_event`
+- `calendar_quick_add`
 - `google_raw_request` (passthrough to any Google API endpoint)
 
 ## Raw request example
