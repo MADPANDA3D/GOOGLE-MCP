@@ -75,6 +75,23 @@ Or with Docker:
 docker compose -f fastmcp/docker-compose.yaml up --build
 ```
 
+## Connect to n8n
+
+If n8n runs in Docker on the same host, make sure the Google MCP container is
+on the `npm_default` network. The provided `fastmcp/docker-compose.yaml` already
+attaches it there.
+
+In n8n:
+
+1. Add an MCP client node (search for "MCP").  
+2. Set the server URL to `http://google-mcp:8086/mcp`.  
+
+If you are connecting from outside Docker, use:
+
+```
+http://<vps-ip>:8086/mcp
+```
+
 ### VPS notes (Ubuntu/Debian)
 
 If you see `externally-managed-environment`, install venv support first:
