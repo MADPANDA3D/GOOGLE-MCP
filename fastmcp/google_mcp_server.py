@@ -115,6 +115,10 @@ def json_dumps(data: Any) -> str:
     return json.dumps(data, indent=2, sort_keys=True)
 
 
+CellValue = str | int | float | bool | None
+Values = list[list[CellValue]]
+
+
 def build_email_message(
     to: str,
     subject: str,
@@ -488,7 +492,7 @@ async def sheets_get_values(spreadsheet_id: str, range_a1: str) -> str:
 async def sheets_update_values(
     spreadsheet_id: str,
     range_a1: str,
-    values: list[list[str | int | float | bool | None]],
+    values: Values,
     value_input_option: str = "RAW",
 ) -> str:
     """Write values to a Google Sheet range."""
