@@ -1260,7 +1260,7 @@ async def slides_replace_text(
 
 @mcp.tool()
 async def gmail_list_labels(
-    fields: str = "",
+    fields: str | dict | None = "",
     minimal: bool = True,
     include_visibility: bool = False,
 ) -> str:
@@ -1268,8 +1268,9 @@ async def gmail_list_labels(
 
     def _list_labels():
         service, cached = client.get_service("gmail", "v1")
-        if fields:
-            effective_fields = fields
+        field_text = fields.strip() if isinstance(fields, str) else ""
+        if field_text:
+            effective_fields = field_text
         elif minimal:
             if include_visibility:
                 effective_fields = "labels(id,name,labelListVisibility,messageListVisibility)"
