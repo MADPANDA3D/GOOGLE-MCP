@@ -200,6 +200,19 @@ def json_dumps(data: Any) -> str:
     return json.dumps(data, separators=(",", ":"), ensure_ascii=True)
 
 
+def _estimate_bytes(data: Any) -> int:
+    if data is None:
+        return 0
+    if isinstance(data, (bytes, bytearray)):
+        return len(data)
+    if isinstance(data, str):
+        return len(data.encode("utf-8"))
+    try:
+        return len(json.dumps(data, separators=(",", ":"), ensure_ascii=True).encode("utf-8"))
+    except (TypeError, ValueError):
+        return len(str(data).encode("utf-8"))
+
+
 def _retry_after_seconds(headers: dict[str, Any] | None) -> float | None:
     if not headers:
         return None
@@ -295,6 +308,21 @@ def _response_payload(
         "error": error if not ok else None,
         "meta": meta,
     }
+    payload["meta"].setdefault("bytes_out", 0)
+    payload["meta"].setdefault("serialization_ms", 0.0)
+    start = time.perf_counter()
+    last_len = -1
+    raw = ""
+    for _ in range(3):
+        raw = json_dumps(payload)
+        raw_len = len(raw.encode("utf-8"))
+        if raw_len == last_len:
+            break
+        payload["meta"]["bytes_out"] = raw_len
+        last_len = raw_len
+    payload["meta"]["serialization_ms"] = round(
+        (time.perf_counter() - start) * 1000, 2
+    )
     raw = json_dumps(payload)
     payload["meta"]["bytes_out"] = len(raw.encode("utf-8"))
     return json_dumps(payload)
@@ -307,6 +335,7 @@ async def run_tool(
     *,
     allow_retry: bool = True,
     meta_extra: dict[str, Any] | None = None,
+    suggested_fields: str | None = None,
 ) -> str:
     start = time.perf_counter()
     retries = 0
@@ -326,11 +355,14 @@ async def run_tool(
                 "action": action,
                 "elapsed_ms": round((time.perf_counter() - start) * 1000, 2),
                 "retry_count": retries,
+                "bytes_in": _estimate_bytes(result),
             }
             if meta_extra:
                 meta.update(meta_extra)
             if result_meta:
                 meta.update(result_meta)
+            if "cached_session" not in meta:
+                meta["cached_session"] = client.is_session_cached()
             if MCP_LOG_REQUESTS:
                 logger.info(
                     "tool_ok api=%s action=%s elapsed_ms=%s retries=%s",
@@ -344,6 +376,8 @@ async def run_tool(
             return json_dumps(result)
         except Exception as exc:
             last_error = _classify_error(exc)
+            if suggested_fields:
+                last_error["suggested_fields"] = suggested_fields
             if allow_retry and retries < MCP_RETRY_MAX and _is_retryable(exc):
                 delay = _retry_delay_seconds(exc, retries + 1)
                 retries += 1
@@ -354,9 +388,12 @@ async def run_tool(
                 "action": action,
                 "elapsed_ms": round((time.perf_counter() - start) * 1000, 2),
                 "retry_count": retries,
+                "bytes_in": 0,
             }
             if meta_extra:
                 meta.update(meta_extra)
+            if "cached_session" not in meta:
+                meta["cached_session"] = client.is_session_cached()
             if MCP_LOG_REQUESTS:
                 logger.warning(
                     "tool_error api=%s action=%s retries=%s error=%s",
@@ -531,7 +568,13 @@ async def drive_list_files(
         data = request.execute()
         return _attach_page_meta(data, cached)
 
-    return await run_tool("drive", "list_files", _list_files, allow_retry=True)
+    return await run_tool(
+        "drive",
+        "list_files",
+        _list_files,
+        allow_retry=True,
+        suggested_fields=DEFAULT_DRIVE_FIELDS,
+    )
 
 
 @mcp.tool()
@@ -560,7 +603,13 @@ async def drive_search_files(
         data = request.execute()
         return _attach_page_meta(data, cached)
 
-    return await run_tool("drive", "search_files", _search_files, allow_retry=True)
+    return await run_tool(
+        "drive",
+        "search_files",
+        _search_files,
+        allow_retry=True,
+        suggested_fields=DEFAULT_DRIVE_FIELDS,
+    )
 
 
 @mcp.tool()
@@ -584,7 +633,13 @@ async def drive_batch_get_metadata(
             files.append(request.execute())
         return {"files": files}, {"cached_service": cached}
 
-    return await run_tool("drive", "batch_get_metadata", _batch_get, allow_retry=True)
+    return await run_tool(
+        "drive",
+        "batch_get_metadata",
+        _batch_get,
+        allow_retry=True,
+        suggested_fields=DEFAULT_DRIVE_GET_FIELDS,
+    )
 
 
 @mcp.tool()
@@ -603,7 +658,13 @@ async def drive_get_file(
         request = service.files().get(fileId=file_id, fields=effective_fields)
         return request.execute(), {"cached_service": cached}
 
-    return await run_tool("drive", "get_file", _get_file, allow_retry=True)
+    return await run_tool(
+        "drive",
+        "get_file",
+        _get_file,
+        allow_retry=True,
+        suggested_fields=DEFAULT_DRIVE_GET_FIELDS,
+    )
 
 
 @mcp.tool()
@@ -874,7 +935,13 @@ async def docs_get_document(document_id: str, fields: str = "") -> str:
         request = service.documents().get(documentId=document_id, fields=effective_fields)
         return request.execute(), {"cached_service": cached}
 
-    return await run_tool("docs", "get_document", _get_doc, allow_retry=True)
+    return await run_tool(
+        "docs",
+        "get_document",
+        _get_doc,
+        allow_retry=True,
+        suggested_fields=DEFAULT_DOCS_FIELDS,
+    )
 
 
 @mcp.tool()
@@ -960,7 +1027,13 @@ async def sheets_get_spreadsheet(spreadsheet_id: str, fields: str = "") -> str:
         )
         return request.execute(), {"cached_service": cached}
 
-    return await run_tool("sheets", "get_spreadsheet", _get_sheet, allow_retry=True)
+    return await run_tool(
+        "sheets",
+        "get_spreadsheet",
+        _get_sheet,
+        allow_retry=True,
+        suggested_fields=DEFAULT_SHEETS_FIELDS,
+    )
 
 
 @mcp.tool()
@@ -979,7 +1052,13 @@ async def sheets_get_values(spreadsheet_id: str, range_a1: str) -> str:
         )
         return request.execute(), {"cached_service": cached}
 
-    return await run_tool("sheets", "get_values", _get_values, allow_retry=True)
+    return await run_tool(
+        "sheets",
+        "get_values",
+        _get_values,
+        allow_retry=True,
+        suggested_fields="sheets.values.get(range=Sheet1!A1:C20)",
+    )
 
 
 @mcp.tool()
@@ -1007,7 +1086,13 @@ async def sheets_batch_get_values(
         )
         return request.execute(), {"cached_service": cached}
 
-    return await run_tool("sheets", "batch_get_values", _batch_get_values, allow_retry=True)
+    return await run_tool(
+        "sheets",
+        "batch_get_values",
+        _batch_get_values,
+        allow_retry=True,
+        suggested_fields="sheets.values.batchGet(ranges=[Sheet1!A1:C20])",
+    )
 
 
 @mcp.tool()
@@ -1069,7 +1154,13 @@ async def slides_get_presentation(presentation_id: str, fields: str = "") -> str
         )
         return request.execute(), {"cached_service": cached}
 
-    return await run_tool("slides", "get_presentation", _get_presentation, allow_retry=True)
+    return await run_tool(
+        "slides",
+        "get_presentation",
+        _get_presentation,
+        allow_retry=True,
+        suggested_fields=DEFAULT_SLIDES_FIELDS,
+    )
 
 
 @mcp.tool()
@@ -1245,7 +1336,13 @@ async def gmail_get_message(
         )
         return request.execute(), {"cached_service": cached}
 
-    return await run_tool("gmail", "get_message", _get_message, allow_retry=True)
+    return await run_tool(
+        "gmail",
+        "get_message",
+        _get_message,
+        allow_retry=True,
+        suggested_fields="format=metadata, metadata_headers=From,To,Subject,Date",
+    )
 
 
 @mcp.tool()
@@ -1392,7 +1489,13 @@ async def gmail_get_thread(
         )
         return request.execute(), {"cached_service": cached}
 
-    return await run_tool("gmail", "get_thread", _get_thread, allow_retry=True)
+    return await run_tool(
+        "gmail",
+        "get_thread",
+        _get_thread,
+        allow_retry=True,
+        suggested_fields="format=metadata, metadata_headers=From,To,Subject,Date",
+    )
 
 
 @mcp.tool()
@@ -1594,7 +1697,13 @@ async def calendar_list_calendars(fields: str = "", page_token: str = "") -> str
         data = request.execute()
         return _attach_page_meta(data, cached)
 
-    return await run_tool("calendar", "list_calendars", _list_calendars, allow_retry=True)
+    return await run_tool(
+        "calendar",
+        "list_calendars",
+        _list_calendars,
+        allow_retry=True,
+        suggested_fields=DEFAULT_CALENDAR_LIST_FIELDS,
+    )
 
 
 @mcp.tool()
@@ -1609,7 +1718,13 @@ async def calendar_get_calendar(calendar_id: str, fields: str = "") -> str:
         request = service.calendars().get(calendarId=calendar_id, fields=effective_fields)
         return request.execute(), {"cached_service": cached}
 
-    return await run_tool("calendar", "get_calendar", _get_calendar, allow_retry=True)
+    return await run_tool(
+        "calendar",
+        "get_calendar",
+        _get_calendar,
+        allow_retry=True,
+        suggested_fields=DEFAULT_CALENDAR_FIELDS,
+    )
 
 
 @mcp.tool()
@@ -1677,7 +1792,13 @@ async def calendar_list_events(
         data = request.execute()
         return _attach_page_meta(data, cached)
 
-    return await run_tool("calendar", "list_events", _list_events, allow_retry=True)
+    return await run_tool(
+        "calendar",
+        "list_events",
+        _list_events,
+        allow_retry=True,
+        suggested_fields=DEFAULT_EVENT_LIST_FIELDS,
+    )
 
 
 @mcp.tool()
@@ -1713,7 +1834,13 @@ async def calendar_search_events(
         data = request.execute()
         return _attach_page_meta(data, cached)
 
-    return await run_tool("calendar", "search_events", _search_events, allow_retry=True)
+    return await run_tool(
+        "calendar",
+        "search_events",
+        _search_events,
+        allow_retry=True,
+        suggested_fields=DEFAULT_EVENT_LIST_FIELDS,
+    )
 
 
 @mcp.tool()
@@ -1743,7 +1870,13 @@ async def calendar_batch_get_events(
             events.append(request.execute())
         return {"events": events}, {"cached_service": cached}
 
-    return await run_tool("calendar", "batch_get_events", _batch_get, allow_retry=True)
+    return await run_tool(
+        "calendar",
+        "batch_get_events",
+        _batch_get,
+        allow_retry=True,
+        suggested_fields=DEFAULT_EVENT_FIELDS,
+    )
 
 
 @mcp.tool()
@@ -1764,7 +1897,13 @@ async def calendar_get_event(calendar_id: str, event_id: str, fields: str = "") 
         )
         return request.execute(), {"cached_service": cached}
 
-    return await run_tool("calendar", "get_event", _get_event, allow_retry=True)
+    return await run_tool(
+        "calendar",
+        "get_event",
+        _get_event,
+        allow_retry=True,
+        suggested_fields=DEFAULT_EVENT_FIELDS,
+    )
 
 
 @mcp.tool()
@@ -1881,6 +2020,7 @@ async def calendar_quick_add(calendar_id: str, text: str) -> str:
 @mcp.tool()
 async def mcp_health_check(
     run_checks: bool = True,
+    warm_all: bool = False,
     doc_id: str = "",
     sheet_id: str = "",
     slide_id: str = "",
@@ -1919,8 +2059,21 @@ async def mcp_health_check(
             except Exception as exc:
                 checks[name] = {"ok": False, "error": _classify_error(exc)}
 
-        if run_checks:
-            client.get_session()
+        warmup: dict[str, Any] = {}
+        if run_checks or warm_all:
+            _, cached_session = client.get_session()
+            warmup["session"] = {"cached_session": cached_session}
+        if warm_all:
+            for api_name, api_version in (
+                ("drive", "v3"),
+                ("docs", "v1"),
+                ("sheets", "v4"),
+                ("slides", "v1"),
+                ("gmail", "v1"),
+                ("calendar", "v3"),
+            ):
+                _, cached = client.get_service(api_name, api_version)
+                warmup[api_name] = {"cached_service": cached}
 
         if run_checks and not has_scope("drive"):
             record_check("drive", lambda: {}, "missing_scope")
@@ -1974,7 +2127,10 @@ async def mcp_health_check(
         if run_checks and not has_scope("documents"):
             record_check("docs", lambda: {}, "missing_scope")
         elif run_checks and not doc_id:
-            record_check("docs", lambda: {}, "missing_doc_id")
+            if warm_all:
+                record_check("docs", lambda: {}, "warmed_without_id")
+            else:
+                record_check("docs", lambda: {}, "missing_doc_id")
         elif run_checks:
             def _docs_check():
                 service, cached = client.get_service("docs", "v1")
@@ -1990,7 +2146,10 @@ async def mcp_health_check(
         if run_checks and not has_scope("spreadsheets"):
             record_check("sheets", lambda: {}, "missing_scope")
         elif run_checks and not sheet_id:
-            record_check("sheets", lambda: {}, "missing_sheet_id")
+            if warm_all:
+                record_check("sheets", lambda: {}, "warmed_without_id")
+            else:
+                record_check("sheets", lambda: {}, "missing_sheet_id")
         elif run_checks:
             def _sheets_check():
                 service, cached = client.get_service("sheets", "v4")
@@ -2006,7 +2165,10 @@ async def mcp_health_check(
         if run_checks and not has_scope("presentations"):
             record_check("slides", lambda: {}, "missing_scope")
         elif run_checks and not slide_id:
-            record_check("slides", lambda: {}, "missing_slide_id")
+            if warm_all:
+                record_check("slides", lambda: {}, "warmed_without_id")
+            else:
+                record_check("slides", lambda: {}, "missing_slide_id")
         elif run_checks:
             def _slides_check():
                 service, cached = client.get_service("slides", "v1")
@@ -2036,6 +2198,7 @@ async def mcp_health_check(
             "scopes": SCOPES,
             "cache_before": cache_before,
             "cache_after": cache_after,
+            "warmup": warmup,
             "checks": checks,
         }
 
