@@ -139,7 +139,7 @@ class GoogleWorkspaceClient:
 
     def get_service(self, api_name: str, api_version: str) -> tuple[Any, bool]:
         creds = self._load_credentials()
-        cache_key = (api_name, api_version)
+        cache_key = (api_name, api_version, tuple(self.scopes))
         with self._lock:
             if cache_key in self._service_cache:
                 return self._service_cache[cache_key], True
@@ -758,6 +758,20 @@ async def drive_download_file(
 
 
 @mcp.tool()
+async def drive_empty_trash(confirm: bool = False) -> str:
+    """Permanently delete all files in Drive trash."""
+
+    def _empty_trash():
+        _ensure_confirmed("empty Drive trash", confirm)
+        service, cached = client.get_service("drive", "v3")
+        request = service.files().emptyTrash()
+        request.execute()
+        return {"status": "ok"}, {"cached_service": cached}
+
+    return await run_tool("drive", "empty_trash", _empty_trash, allow_retry=False)
+
+
+@mcp.tool()
 async def docs_create_document(title: str) -> str:
     """Create a Google Doc."""
 
@@ -991,13 +1005,24 @@ async def slides_replace_text(
 
 
 @mcp.tool()
-async def gmail_list_labels() -> str:
+async def gmail_list_labels(fields: str = "", minimal: bool = False) -> str:
     """List Gmail labels for the authenticated user."""
 
     def _list_labels():
         service, cached = client.get_service("gmail", "v1")
-        request = service.users().labels().list(userId="me")
-        return request.execute(), {"cached_service": cached}
+        effective_fields = fields or ("labels(id,name)" if minimal else "")
+        request = service.users().labels().list(
+            userId="me",
+            fields=effective_fields or None,
+        )
+        data = request.execute()
+        if minimal:
+            labels = [
+                {"id": label.get("id"), "name": label.get("name")}
+                for label in data.get("labels", []) or []
+            ]
+            return {"labels": labels}, {"cached_service": cached}
+        return data, {"cached_service": cached}
 
     return await run_tool("gmail", "list_labels", _list_labels, allow_retry=True)
 

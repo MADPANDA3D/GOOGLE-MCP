@@ -110,10 +110,13 @@ Then create the virtual environment as shown above.
 ## Tools (curated)
 
 - `drive_list_files`
+- `drive_search_files`
+- `drive_batch_get_metadata`
 - `drive_get_file`
 - `drive_create_folder`
 - `drive_upload_file`
 - `drive_download_file`
+- `drive_empty_trash`
 - `docs_create_document`
 - `docs_get_document`
 - `docs_insert_text`
@@ -129,7 +132,11 @@ Then create the virtual environment as shown above.
 - `gmail_create_label`
 - `gmail_delete_label`
 - `gmail_list_messages`
+- `gmail_search_messages`
 - `gmail_get_message`
+- `gmail_get_message_headers`
+- `gmail_get_message_body`
+- `gmail_batch_get_metadata`
 - `gmail_list_threads`
 - `gmail_get_thread`
 - `gmail_send_message`
@@ -145,12 +152,24 @@ Then create the virtual environment as shown above.
 - `calendar_create_calendar`
 - `calendar_delete_calendar`
 - `calendar_list_events`
+- `calendar_search_events`
+- `calendar_batch_get_events`
 - `calendar_get_event`
 - `calendar_create_event`
 - `calendar_update_event`
 - `calendar_delete_event`
 - `calendar_quick_add`
 - `google_raw_request` (passthrough to any Google API endpoint)
+
+## Pagination
+
+List/search tools accept `page_token` and return `nextPageToken` in the response.
+
+## Performance tips
+
+- Most `get` and list tools accept `fields` for partial responses.
+- `gmail_get_message` defaults to metadata; use `gmail_get_message_body` for content.
+- `drive_download_file` returns a `download_url` by default; set `include_content=true` to include base64 content (bounded by `MCP_MAX_DOWNLOAD_BYTES`).
 
 ## Raw request example
 
