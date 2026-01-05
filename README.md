@@ -7,7 +7,7 @@ Unified Google Workspace MCP server for Drive, Docs, Sheets, and Slides.
 - FastMCP server in Python
 - OAuth token bootstrap script for local browser login
 - Curated tools for common Drive/Docs/Sheets/Slides operations
-- `google_raw_request` passthrough for any Google API endpoint
+- `google_raw_request` advanced/debug passthrough for Google API endpoints
 
 ## Setup
 
@@ -162,7 +162,7 @@ Then create the virtual environment as shown above.
 - `calendar_update_event`
 - `calendar_delete_event`
 - `calendar_quick_add`
-- `google_raw_request` (passthrough to any Google API endpoint)
+- `google_raw_request` (advanced/debug passthrough; see below)
 - `mcp_health_check`
 
 ## Pagination
@@ -177,7 +177,7 @@ Agents should prefer `meta.next_page_token` for paging; `data.nextPageToken` rem
 - `gmail_get_message` defaults to metadata; use `gmail_get_message_body` for content.
 - `drive_download_file` returns a `download_url` by default; set `include_content=true` or `return_mode="base64"` to include base64 content (bounded by `MCP_MAX_DOWNLOAD_BYTES`).
 - Use `mcp_health_check(run_checks=true, warm_all=true)` to validate auth/scopes and warm caches; provide `doc_id`, `sheet_id`, `slide_id` for deeper checks.
-- Response meta includes `elapsed_ms`, `bytes_in`, `bytes_out`, `serialization_ms`, and `request_id` for performance tuning.
+- Response meta includes `elapsed_ms`, `bytes_in`, `bytes_out`, `serialization_ms`, `request_id`, and `server_version` for performance tuning.
 - Response meta includes `server_instance_id` and `server_uptime_ms` to confirm caching across calls.
 
 ## Recommended defaults
@@ -187,6 +187,7 @@ Agents should prefer `meta.next_page_token` for paging; `data.nextPageToken` rem
 - Use Gmail metadata tools unless you need raw MIME.
 - Call `mcp_health_check(run_checks=true, warm_all=true)` after restarts.
 - Keep `MCP_WORKERS=1` if you want caching to persist across calls.
+- `gmail_list_labels` defaults to minimal output; set `include_visibility=true` or `fields` for full label data.
 
 ## Raw request example
 
@@ -197,6 +198,8 @@ method: "GET"
 url: "/drive/v3/files"
 params: {"pageSize": 10}
 ```
+
+Note: `google_raw_request` is powerful but easy to misuse. Prefer the curated tools unless you need a specific endpoint. If you enable `MCP_RAW_STRICT=true`, requests must target a Google API host (or use a relative path); invalid hosts are rejected with a clear error.
 
 ## Notes
 

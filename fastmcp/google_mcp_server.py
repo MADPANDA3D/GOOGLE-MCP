@@ -77,6 +77,8 @@ MCP_REQUIRE_CONFIRM = os.getenv("MCP_REQUIRE_CONFIRM", "").lower() in {
 }
 MCP_DRIVE_ALLOWLIST_PARENT_ID = os.getenv("MCP_DRIVE_ALLOWLIST_PARENT_ID", "")
 DEFAULT_MAX_DOWNLOAD_BYTES = int(os.getenv("MCP_MAX_DOWNLOAD_BYTES", "5000000"))
+MCP_RAW_STRICT = os.getenv("MCP_RAW_STRICT", "").lower() in {"1", "true", "yes"}
+MCP_SERVER_VERSION = os.getenv("MCP_SERVER_VERSION", "unknown")
 
 SERVER_START_TIME = time.time()
 SERVER_START_MONO = time.monotonic()
@@ -217,6 +219,41 @@ def _estimate_bytes(data: Any) -> int:
         return len(json.dumps(data, separators=(",", ":"), ensure_ascii=True).encode("utf-8"))
     except (TypeError, ValueError):
         return len(str(data).encode("utf-8"))
+
+
+def _validate_raw_request_url(url: str) -> str:
+    cleaned = (url or "").strip()
+    if not cleaned:
+        raise ValueError(
+            "raw_request url cannot be empty. Example: /drive/v3/files or https://www.googleapis.com/drive/v3/files"
+        )
+    if not MCP_RAW_STRICT:
+        return normalize_url(cleaned)
+
+    allowed_hosts = {
+        "www.googleapis.com",
+        "gmail.googleapis.com",
+        "drive.googleapis.com",
+        "sheets.googleapis.com",
+        "docs.googleapis.com",
+        "slides.googleapis.com",
+        "calendar.googleapis.com",
+        "oauth2.googleapis.com",
+        "people.googleapis.com",
+    }
+    if cleaned.startswith("http://") or cleaned.startswith("https://"):
+        parsed = urllib.parse.urlparse(cleaned)
+        host = (parsed.hostname or "").lower()
+        if host not in allowed_hosts:
+            raise ValueError(
+                "raw_request url host is not allowed in strict mode. "
+                "Use a Google API host or a relative path like /drive/v3/files."
+            )
+        return cleaned
+
+    if not cleaned.startswith("/"):
+        cleaned = "/" + cleaned
+    return f"https://www.googleapis.com{cleaned}"
 
 
 def _retry_after_seconds(headers: dict[str, Any] | None) -> float | None:
@@ -443,6 +480,7 @@ def _server_meta() -> dict[str, Any]:
     return {
         "server_instance_id": SERVER_INSTANCE_ID,
         "server_uptime_ms": round((time.monotonic() - SERVER_START_MONO) * 1000, 2),
+        "server_version": MCP_SERVER_VERSION,
     }
 
 
@@ -535,7 +573,7 @@ async def google_raw_request(
         session, cached = client.get_session()
         response = session.request(
             method.upper(),
-            normalize_url(url),
+            _validate_raw_request_url(url),
             params=params,
             json=json_body,
             headers=headers,
@@ -1221,20 +1259,43 @@ async def slides_replace_text(
 
 
 @mcp.tool()
-async def gmail_list_labels(fields: str = "", minimal: bool = False) -> str:
+async def gmail_list_labels(
+    fields: str = "",
+    minimal: bool = True,
+    include_visibility: bool = False,
+) -> str:
     """List Gmail labels for the authenticated user."""
 
     def _list_labels():
         service, cached = client.get_service("gmail", "v1")
-        effective_fields = fields or ("labels(id,name)" if minimal else "")
+        if fields:
+            effective_fields = fields
+        elif minimal:
+            if include_visibility:
+                effective_fields = "labels(id,name,labelListVisibility,messageListVisibility)"
+            else:
+                effective_fields = "labels(id,name)"
+        else:
+            effective_fields = ""
         request = service.users().labels().list(
             userId="me",
             fields=effective_fields or None,
         )
         data = request.execute()
-        if minimal:
+        if minimal and not fields:
             labels = [
-                {"id": label.get("id"), "name": label.get("name")}
+                {
+                    "id": label.get("id"),
+                    "name": label.get("name"),
+                    **(
+                        {
+                            "labelListVisibility": label.get("labelListVisibility"),
+                            "messageListVisibility": label.get("messageListVisibility"),
+                        }
+                        if include_visibility
+                        else {}
+                    ),
+                }
                 for label in data.get("labels", []) or []
             ]
             return {"labels": labels}, {"cached_service": cached}
@@ -2222,6 +2283,7 @@ async def mcp_health_check(
         return {
             "server_instance_id": SERVER_INSTANCE_ID,
             "server_uptime_ms": round((time.monotonic() - SERVER_START_MONO) * 1000, 2),
+            "server_version": MCP_SERVER_VERSION,
             "user_email": user_email,
             "token_valid": creds.valid,
             "token_expiry": creds.expiry.isoformat() if creds.expiry else None,
