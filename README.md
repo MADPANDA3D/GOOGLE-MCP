@@ -117,6 +117,8 @@ Then create the virtual environment as shown above.
 - `drive_upload_file`
 - `drive_download_file`
 - `drive_empty_trash`
+- `drive_delete_file`
+- `drive_purge_trash`
 - `docs_create_document`
 - `docs_get_document`
 - `docs_insert_text`
@@ -124,6 +126,7 @@ Then create the virtual environment as shown above.
 - `sheets_create_spreadsheet`
 - `sheets_get_spreadsheet`
 - `sheets_get_values`
+- `sheets_batch_get_values`
 - `sheets_update_values`
 - `slides_create_presentation`
 - `slides_get_presentation`
@@ -160,16 +163,18 @@ Then create the virtual environment as shown above.
 - `calendar_delete_event`
 - `calendar_quick_add`
 - `google_raw_request` (passthrough to any Google API endpoint)
+- `mcp_health_check`
 
 ## Pagination
 
-List/search tools accept `page_token` and return `nextPageToken` in the response.
+List/search tools accept `page_token` and return `nextPageToken` in the response (also echoed as `meta.next_page_token`).
 
 ## Performance tips
 
 - Most `get` and list tools accept `fields` for partial responses.
 - `gmail_get_message` defaults to metadata; use `gmail_get_message_body` for content.
-- `drive_download_file` returns a `download_url` by default; set `include_content=true` to include base64 content (bounded by `MCP_MAX_DOWNLOAD_BYTES`).
+- `drive_download_file` returns a `download_url` by default; set `include_content=true` or `return_mode="base64"` to include base64 content (bounded by `MCP_MAX_DOWNLOAD_BYTES`).
+- Use `mcp_health_check` to validate auth/scopes and warm caches.
 
 ## Raw request example
 

@@ -163,6 +163,15 @@ class GoogleWorkspaceClient:
         session, _ = self.get_session()
         return session
 
+    def is_service_cached(self, api_name: str, api_version: str) -> bool:
+        cache_key = (api_name, api_version, tuple(self.scopes))
+        with self._lock:
+            return cache_key in self._service_cache
+
+    def is_session_cached(self) -> bool:
+        with self._lock:
+            return self._session is not None
+
 
 SCOPES = parse_scopes(GOOGLE_SCOPES_RAW)
 if not SCOPES:
@@ -366,6 +375,20 @@ def _ensure_confirmed(action: str, confirm: bool) -> None:
         raise ValueError(f"confirm=true is required to {action}.")
 
 
+def _require_confirm(action: str, confirm: bool) -> None:
+    if not confirm:
+        raise ValueError(f"confirm=true is required to {action}.")
+
+
+def _attach_page_meta(data: Any, cached: bool) -> tuple[Any, dict[str, Any]]:
+    meta: dict[str, Any] = {"cached_service": cached}
+    if isinstance(data, dict):
+        next_token = data.get("nextPageToken")
+        if next_token:
+            meta["next_page_token"] = next_token
+    return data, meta
+
+
 def _enforce_drive_allowlist(parent_id: str, allow_any_parent: bool) -> str:
     if not MCP_DRIVE_ALLOWLIST_PARENT_ID:
         return parent_id
@@ -505,7 +528,8 @@ async def drive_list_files(
             orderBy=order_by or None,
             pageToken=page_token or None,
         )
-        return request.execute(), {"cached_service": cached}
+        data = request.execute()
+        return _attach_page_meta(data, cached)
 
     return await run_tool("drive", "list_files", _list_files, allow_retry=True)
 
@@ -533,7 +557,8 @@ async def drive_search_files(
             orderBy=order_by or None,
             pageToken=page_token or None,
         )
-        return request.execute(), {"cached_service": cached}
+        data = request.execute()
+        return _attach_page_meta(data, cached)
 
     return await run_tool("drive", "search_files", _search_files, allow_retry=True)
 
@@ -646,6 +671,7 @@ async def drive_download_file(
     file_id: str,
     export_mime_type: str = "",
     include_content: bool = False,
+    return_mode: str = "",
     max_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES,
     range_start: int | None = None,
     range_end: int | None = None,
@@ -655,6 +681,13 @@ async def drive_download_file(
     def _download():
         if not file_id:
             raise ValueError("file_id cannot be empty")
+        mode = (return_mode or "").strip().lower()
+        if mode and mode not in {"url", "base64", "both"}:
+            raise ValueError("return_mode must be one of: url, base64, both.")
+        include_data = include_content
+        if mode:
+            include_data = mode in {"base64", "both"}
+        include_url = mode in {"", "url", "both"}
         service, cached_service = client.get_service("drive", "v3")
         metadata = service.files().get(
             fileId=file_id, fields="id,name,mimeType,size,webViewLink,webContentLink"
@@ -684,9 +717,10 @@ async def drive_download_file(
         response_payload: dict[str, Any] = {
             "file": metadata,
             "download_mime_type": download_mime,
-            "download_url": download_url,
         }
-        if not include_content:
+        if include_url:
+            response_payload["download_url"] = download_url
+        if not include_data:
             return response_payload, {"cached_service": cached_service}
 
         size = metadata.get("size")
@@ -758,17 +792,60 @@ async def drive_download_file(
 
 
 @mcp.tool()
+async def drive_delete_file(
+    file_id: str,
+    mode: str = "trash",
+    confirm: bool = False,
+) -> str:
+    """Trash or permanently delete a Drive file."""
+
+    def _delete_file():
+        if not file_id:
+            raise ValueError("file_id cannot be empty")
+        action = (mode or "trash").strip().lower()
+        if action not in {"trash", "permanent"}:
+            raise ValueError("mode must be one of: trash, permanent.")
+        service, cached = client.get_service("drive", "v3")
+        if action == "trash":
+            request = service.files().update(
+                fileId=file_id,
+                body={"trashed": True},
+                fields="id,trashed",
+            )
+            return request.execute(), {"cached_service": cached}
+        _require_confirm("permanently delete a Drive file", confirm)
+        service.files().delete(fileId=file_id).execute()
+        return {"id": file_id, "deleted": True}, {"cached_service": cached}
+
+    return await run_tool("drive", "delete_file", _delete_file, allow_retry=False)
+
+
+@mcp.tool()
 async def drive_empty_trash(confirm: bool = False) -> str:
     """Permanently delete all files in Drive trash."""
 
     def _empty_trash():
-        _ensure_confirmed("empty Drive trash", confirm)
+        _require_confirm("empty Drive trash", confirm)
         service, cached = client.get_service("drive", "v3")
         request = service.files().emptyTrash()
         request.execute()
         return {"status": "ok"}, {"cached_service": cached}
 
     return await run_tool("drive", "empty_trash", _empty_trash, allow_retry=False)
+
+
+@mcp.tool()
+async def drive_purge_trash(confirm: bool = False) -> str:
+    """Alias for emptying Drive trash."""
+
+    def _purge_trash():
+        _require_confirm("purge Drive trash", confirm)
+        service, cached = client.get_service("drive", "v3")
+        request = service.files().emptyTrash()
+        request.execute()
+        return {"status": "ok"}, {"cached_service": cached}
+
+    return await run_tool("drive", "purge_trash", _purge_trash, allow_retry=False)
 
 
 @mcp.tool()
@@ -903,6 +980,34 @@ async def sheets_get_values(spreadsheet_id: str, range_a1: str) -> str:
         return request.execute(), {"cached_service": cached}
 
     return await run_tool("sheets", "get_values", _get_values, allow_retry=True)
+
+
+@mcp.tool()
+async def sheets_batch_get_values(
+    spreadsheet_id: str,
+    ranges: list[str],
+    value_render_option: str = "",
+    date_time_render_option: str = "",
+    major_dimension: str = "",
+) -> str:
+    """Read values from multiple ranges in a Google Sheet."""
+
+    def _batch_get_values():
+        if not spreadsheet_id:
+            raise ValueError("spreadsheet_id cannot be empty")
+        if not ranges:
+            raise ValueError("ranges cannot be empty")
+        service, cached = client.get_service("sheets", "v4")
+        request = service.spreadsheets().values().batchGet(
+            spreadsheetId=spreadsheet_id,
+            ranges=ranges,
+            valueRenderOption=value_render_option or None,
+            dateTimeRenderOption=date_time_render_option or None,
+            majorDimension=major_dimension or None,
+        )
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("sheets", "batch_get_values", _batch_get_values, allow_retry=True)
 
 
 @mcp.tool()
@@ -1085,7 +1190,8 @@ async def gmail_list_messages(
             includeSpamTrash=include_spam_trash,
             pageToken=page_token or None,
         )
-        return request.execute(), {"cached_service": cached}
+        data = request.execute()
+        return _attach_page_meta(data, cached)
 
     return await run_tool("gmail", "list_messages", _list_messages, allow_retry=True)
 
@@ -1112,7 +1218,8 @@ async def gmail_search_messages(
             includeSpamTrash=include_spam_trash,
             pageToken=page_token or None,
         )
-        return request.execute(), {"cached_service": cached}
+        data = request.execute()
+        return _attach_page_meta(data, cached)
 
     return await run_tool("gmail", "search_messages", _search_messages, allow_retry=True)
 
@@ -1258,7 +1365,8 @@ async def gmail_list_threads(
             maxResults=max_results,
             pageToken=page_token or None,
         )
-        return request.execute(), {"cached_service": cached}
+        data = request.execute()
+        return _attach_page_meta(data, cached)
 
     return await run_tool("gmail", "list_threads", _list_threads, allow_retry=True)
 
@@ -1483,7 +1591,8 @@ async def calendar_list_calendars(fields: str = "", page_token: str = "") -> str
             fields=effective_fields,
             pageToken=page_token or None,
         )
-        return request.execute(), {"cached_service": cached}
+        data = request.execute()
+        return _attach_page_meta(data, cached)
 
     return await run_tool("calendar", "list_calendars", _list_calendars, allow_retry=True)
 
@@ -1565,7 +1674,8 @@ async def calendar_list_events(
             fields=effective_fields,
             pageToken=page_token or None,
         )
-        return request.execute(), {"cached_service": cached}
+        data = request.execute()
+        return _attach_page_meta(data, cached)
 
     return await run_tool("calendar", "list_events", _list_events, allow_retry=True)
 
@@ -1600,7 +1710,8 @@ async def calendar_search_events(
             fields=effective_fields,
             pageToken=page_token or None,
         )
-        return request.execute(), {"cached_service": cached}
+        data = request.execute()
+        return _attach_page_meta(data, cached)
 
     return await run_tool("calendar", "search_events", _search_events, allow_retry=True)
 
@@ -1765,6 +1876,170 @@ async def calendar_quick_add(calendar_id: str, text: str) -> str:
         return request.execute(), {"cached_service": cached}
 
     return await run_tool("calendar", "quick_add", _quick_add, allow_retry=False)
+
+
+@mcp.tool()
+async def mcp_health_check(
+    run_checks: bool = True,
+    doc_id: str = "",
+    sheet_id: str = "",
+    slide_id: str = "",
+) -> str:
+    """Report auth/scopes plus optional API health checks."""
+
+    def _health_check():
+        creds = client._load_credentials()
+        cache_before = {
+            "drive": client.is_service_cached("drive", "v3"),
+            "docs": client.is_service_cached("docs", "v1"),
+            "sheets": client.is_service_cached("sheets", "v4"),
+            "slides": client.is_service_cached("slides", "v1"),
+            "gmail": client.is_service_cached("gmail", "v1"),
+            "calendar": client.is_service_cached("calendar", "v3"),
+            "session": client.is_session_cached(),
+        }
+        checks: dict[str, Any] = {}
+        user_email = ""
+
+        def has_scope(fragment: str) -> bool:
+            return any(fragment in scope for scope in SCOPES)
+
+        def record_check(name: str, func, skip_reason: str | None = None) -> None:
+            nonlocal user_email
+            if skip_reason:
+                checks[name] = {"ok": None, "skipped": True, "reason": skip_reason}
+                return
+            try:
+                result = func()
+                if isinstance(result, dict):
+                    maybe_email = result.get("user_email")
+                    if maybe_email and not user_email:
+                        user_email = maybe_email
+                checks[name] = {"ok": True, **result}
+            except Exception as exc:
+                checks[name] = {"ok": False, "error": _classify_error(exc)}
+
+        if run_checks:
+            client.get_session()
+
+        if run_checks and not has_scope("drive"):
+            record_check("drive", lambda: {}, "missing_scope")
+        elif run_checks:
+            def _drive_check():
+                service, cached = client.get_service("drive", "v3")
+                data = service.about().get(fields="user,storageQuota").execute()
+                user = data.get("user", {}) or {}
+                return {
+                    "cached_service": cached,
+                    "user_email": user.get("emailAddress", ""),
+                    "user": user,
+                    "storage_quota": data.get("storageQuota", {}),
+                }
+            record_check("drive", _drive_check)
+        else:
+            record_check("drive", lambda: {}, "disabled")
+
+        if run_checks and not has_scope("gmail"):
+            record_check("gmail", lambda: {}, "missing_scope")
+        elif run_checks:
+            def _gmail_check():
+                service, cached = client.get_service("gmail", "v1")
+                data = service.users().getProfile(userId="me").execute()
+                return {
+                    "cached_service": cached,
+                    "user_email": data.get("emailAddress", ""),
+                    "profile": data,
+                }
+            record_check("gmail", _gmail_check)
+        else:
+            record_check("gmail", lambda: {}, "disabled")
+
+        if run_checks and not has_scope("calendar"):
+            record_check("calendar", lambda: {}, "missing_scope")
+        elif run_checks:
+            def _calendar_check():
+                service, cached = client.get_service("calendar", "v3")
+                data = service.calendarList().list(
+                    maxResults=1,
+                    fields="items(id,summary,primary),nextPageToken",
+                ).execute()
+                return {
+                    "cached_service": cached,
+                    "calendar_count": len(data.get("items", []) or []),
+                }
+            record_check("calendar", _calendar_check)
+        else:
+            record_check("calendar", lambda: {}, "disabled")
+
+        if run_checks and not has_scope("documents"):
+            record_check("docs", lambda: {}, "missing_scope")
+        elif run_checks and not doc_id:
+            record_check("docs", lambda: {}, "missing_doc_id")
+        elif run_checks:
+            def _docs_check():
+                service, cached = client.get_service("docs", "v1")
+                data = service.documents().get(
+                    documentId=doc_id,
+                    fields=DEFAULT_DOCS_FIELDS,
+                ).execute()
+                return {"cached_service": cached, "document": data}
+            record_check("docs", _docs_check)
+        else:
+            record_check("docs", lambda: {}, "disabled")
+
+        if run_checks and not has_scope("spreadsheets"):
+            record_check("sheets", lambda: {}, "missing_scope")
+        elif run_checks and not sheet_id:
+            record_check("sheets", lambda: {}, "missing_sheet_id")
+        elif run_checks:
+            def _sheets_check():
+                service, cached = client.get_service("sheets", "v4")
+                data = service.spreadsheets().get(
+                    spreadsheetId=sheet_id,
+                    fields=DEFAULT_SHEETS_FIELDS,
+                ).execute()
+                return {"cached_service": cached, "spreadsheet": data}
+            record_check("sheets", _sheets_check)
+        else:
+            record_check("sheets", lambda: {}, "disabled")
+
+        if run_checks and not has_scope("presentations"):
+            record_check("slides", lambda: {}, "missing_scope")
+        elif run_checks and not slide_id:
+            record_check("slides", lambda: {}, "missing_slide_id")
+        elif run_checks:
+            def _slides_check():
+                service, cached = client.get_service("slides", "v1")
+                data = service.presentations().get(
+                    presentationId=slide_id,
+                    fields=DEFAULT_SLIDES_FIELDS,
+                ).execute()
+                return {"cached_service": cached, "presentation": data}
+            record_check("slides", _slides_check)
+        else:
+            record_check("slides", lambda: {}, "disabled")
+
+        cache_after = {
+            "drive": client.is_service_cached("drive", "v3"),
+            "docs": client.is_service_cached("docs", "v1"),
+            "sheets": client.is_service_cached("sheets", "v4"),
+            "slides": client.is_service_cached("slides", "v1"),
+            "gmail": client.is_service_cached("gmail", "v1"),
+            "calendar": client.is_service_cached("calendar", "v3"),
+            "session": client.is_session_cached(),
+        }
+
+        return {
+            "user_email": user_email,
+            "token_valid": creds.valid,
+            "token_expiry": creds.expiry.isoformat() if creds.expiry else None,
+            "scopes": SCOPES,
+            "cache_before": cache_before,
+            "cache_after": cache_after,
+            "checks": checks,
+        }
+
+    return await run_tool("mcp", "health_check", _health_check, allow_retry=False)
 
 
 if __name__ == "__main__":
