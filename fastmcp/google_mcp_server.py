@@ -8,6 +8,7 @@ import random
 import threading
 import time
 import urllib.parse
+import uuid
 from email.message import EmailMessage
 from typing import Any, Callable
 
@@ -337,6 +338,7 @@ async def run_tool(
     meta_extra: dict[str, Any] | None = None,
     suggested_fields: str | None = None,
 ) -> str:
+    request_id = uuid.uuid4().hex
     start = time.perf_counter()
     retries = 0
     last_error: dict[str, Any] | None = None
@@ -356,6 +358,7 @@ async def run_tool(
                 "elapsed_ms": round((time.perf_counter() - start) * 1000, 2),
                 "retry_count": retries,
                 "bytes_in": _estimate_bytes(result),
+                "request_id": request_id,
             }
             if meta_extra:
                 meta.update(meta_extra)
@@ -365,7 +368,8 @@ async def run_tool(
                 meta["cached_session"] = client.is_session_cached()
             if MCP_LOG_REQUESTS:
                 logger.info(
-                    "tool_ok api=%s action=%s elapsed_ms=%s retries=%s",
+                    "tool_ok request_id=%s api=%s action=%s elapsed_ms=%s retries=%s",
+                    request_id,
                     api,
                     action,
                     meta["elapsed_ms"],
@@ -389,6 +393,7 @@ async def run_tool(
                 "elapsed_ms": round((time.perf_counter() - start) * 1000, 2),
                 "retry_count": retries,
                 "bytes_in": 0,
+                "request_id": request_id,
             }
             if meta_extra:
                 meta.update(meta_extra)
@@ -396,7 +401,8 @@ async def run_tool(
                 meta["cached_session"] = client.is_session_cached()
             if MCP_LOG_REQUESTS:
                 logger.warning(
-                    "tool_error api=%s action=%s retries=%s error=%s",
+                    "tool_error request_id=%s api=%s action=%s retries=%s error=%s",
+                    request_id,
                     api,
                     action,
                     retries,
@@ -2062,7 +2068,11 @@ async def mcp_health_check(
         warmup: dict[str, Any] = {}
         if run_checks or warm_all:
             _, cached_session = client.get_session()
-            warmup["session"] = {"cached_session": cached_session}
+            warmup["session"] = {
+                "was_cached": cached_session,
+                "cached_session": True,
+                "warmed_now": not cached_session,
+            }
         if warm_all:
             for api_name, api_version in (
                 ("drive", "v3"),
@@ -2073,7 +2083,11 @@ async def mcp_health_check(
                 ("calendar", "v3"),
             ):
                 _, cached = client.get_service(api_name, api_version)
-                warmup[api_name] = {"cached_service": cached}
+                warmup[api_name] = {
+                    "was_cached": cached,
+                    "cached_service": True,
+                    "warmed_now": not cached,
+                }
 
         if run_checks and not has_scope("drive"):
             record_check("drive", lambda: {}, "missing_scope")

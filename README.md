@@ -169,13 +169,22 @@ Then create the virtual environment as shown above.
 
 List/search tools accept `page_token` and return `nextPageToken` in the response (also echoed as `meta.next_page_token`).
 
+Agents should prefer `meta.next_page_token` for paging; `data.nextPageToken` remains for compatibility.
+
 ## Performance tips
 
 - Most `get` and list tools accept `fields` for partial responses.
 - `gmail_get_message` defaults to metadata; use `gmail_get_message_body` for content.
 - `drive_download_file` returns a `download_url` by default; set `include_content=true` or `return_mode="base64"` to include base64 content (bounded by `MCP_MAX_DOWNLOAD_BYTES`).
 - Use `mcp_health_check(run_checks=true, warm_all=true)` to validate auth/scopes and warm caches; provide `doc_id`, `sheet_id`, `slide_id` for deeper checks.
-- Response meta includes `elapsed_ms`, `bytes_in`, `bytes_out`, and `serialization_ms` for performance tuning.
+- Response meta includes `elapsed_ms`, `bytes_in`, `bytes_out`, `serialization_ms`, and `request_id` for performance tuning.
+
+## Recommended defaults
+
+- Use `fields` for Docs/Sheets/Slides to keep payloads small.
+- Prefer `drive_download_file(return_mode="url")` unless you explicitly need file bytes.
+- Use Gmail metadata tools unless you need raw MIME.
+- Call `mcp_health_check(run_checks=true, warm_all=true)` after restarts.
 
 ## Raw request example
 
