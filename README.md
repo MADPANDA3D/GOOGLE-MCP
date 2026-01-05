@@ -179,6 +179,7 @@ Agents should prefer `meta.next_page_token` for paging; `data.nextPageToken` rem
 - Use `mcp_health_check(run_checks=true, warm_all=true)` to validate auth/scopes and warm caches; provide `doc_id`, `sheet_id`, `slide_id` for deeper checks.
 - Response meta includes `elapsed_ms`, `bytes_in`, `bytes_out`, `serialization_ms`, `request_id`, and `server_version` for performance tuning.
 - Response meta includes `server_instance_id` and `server_uptime_ms` to confirm caching across calls.
+- If a request parameter is malformed, tools may add `meta.warnings`; set `MCP_STRICT_PARAMS=true` to turn these into errors.
 
 ## Recommended defaults
 

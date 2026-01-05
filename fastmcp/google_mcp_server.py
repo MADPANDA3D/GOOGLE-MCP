@@ -79,6 +79,7 @@ MCP_DRIVE_ALLOWLIST_PARENT_ID = os.getenv("MCP_DRIVE_ALLOWLIST_PARENT_ID", "")
 DEFAULT_MAX_DOWNLOAD_BYTES = int(os.getenv("MCP_MAX_DOWNLOAD_BYTES", "5000000"))
 MCP_RAW_STRICT = os.getenv("MCP_RAW_STRICT", "").lower() in {"1", "true", "yes"}
 MCP_SERVER_VERSION = os.getenv("MCP_SERVER_VERSION", "unknown")
+MCP_STRICT_PARAMS = os.getenv("MCP_STRICT_PARAMS", "").lower() in {"1", "true", "yes"}
 
 SERVER_START_TIME = time.time()
 SERVER_START_MONO = time.monotonic()
@@ -1268,7 +1269,14 @@ async def gmail_list_labels(
 
     def _list_labels():
         service, cached = client.get_service("gmail", "v1")
-        field_text = fields.strip() if isinstance(fields, str) else ""
+        warnings: list[str] = []
+        if fields is not None and not isinstance(fields, str):
+            if MCP_STRICT_PARAMS:
+                raise ValueError("fields must be a string.")
+            warnings.append("fields must be a string; ignored")
+            field_text = ""
+        else:
+            field_text = fields.strip() if isinstance(fields, str) else ""
         if field_text:
             effective_fields = field_text
         elif minimal:
@@ -1283,7 +1291,7 @@ async def gmail_list_labels(
             fields=effective_fields or None,
         )
         data = request.execute()
-        if minimal and not fields:
+        if minimal and not field_text:
             labels = [
                 {
                     "id": label.get("id"),
@@ -1299,8 +1307,14 @@ async def gmail_list_labels(
                 }
                 for label in data.get("labels", []) or []
             ]
-            return {"labels": labels}, {"cached_service": cached}
-        return data, {"cached_service": cached}
+            meta = {"cached_service": cached}
+            if warnings:
+                meta["warnings"] = warnings
+            return {"labels": labels}, meta
+        meta = {"cached_service": cached}
+        if warnings:
+            meta["warnings"] = warnings
+        return data, meta
 
     return await run_tool("gmail", "list_labels", _list_labels, allow_retry=True)
 
