@@ -58,6 +58,7 @@ GOOGLE_CREDENTIALS_PATH = os.getenv(
 )
 GOOGLE_TOKEN_PATH = os.getenv("GOOGLE_TOKEN_PATH", "fastmcp/.google/token.json")
 GOOGLE_SCOPES_RAW = os.getenv("GOOGLE_SCOPES", " ".join(DEFAULT_SCOPES))
+MCP_WORKERS = int(os.getenv("MCP_WORKERS", "1"))
 MCP_PRETTY_JSON = os.getenv("MCP_PRETTY_JSON", "").lower() in {"1", "true", "yes"}
 MCP_RESPONSE_ENVELOPE = os.getenv("MCP_RESPONSE_ENVELOPE", "true").lower() in {
     "1",
@@ -76,6 +77,10 @@ MCP_REQUIRE_CONFIRM = os.getenv("MCP_REQUIRE_CONFIRM", "").lower() in {
 }
 MCP_DRIVE_ALLOWLIST_PARENT_ID = os.getenv("MCP_DRIVE_ALLOWLIST_PARENT_ID", "")
 DEFAULT_MAX_DOWNLOAD_BYTES = int(os.getenv("MCP_MAX_DOWNLOAD_BYTES", "5000000"))
+
+SERVER_START_TIME = time.time()
+SERVER_START_MONO = time.monotonic()
+SERVER_INSTANCE_ID = f"{os.getpid()}-{int(SERVER_START_TIME)}"
 
 
 mcp = FastMCP(
@@ -360,6 +365,7 @@ async def run_tool(
                 "bytes_in": _estimate_bytes(result),
                 "request_id": request_id,
             }
+            meta.update(_server_meta())
             if meta_extra:
                 meta.update(meta_extra)
             if result_meta:
@@ -395,6 +401,7 @@ async def run_tool(
                 "bytes_in": 0,
                 "request_id": request_id,
             }
+            meta.update(_server_meta())
             if meta_extra:
                 meta.update(meta_extra)
             if "cached_session" not in meta:
@@ -430,6 +437,13 @@ def _attach_page_meta(data: Any, cached: bool) -> tuple[Any, dict[str, Any]]:
         if next_token:
             meta["next_page_token"] = next_token
     return data, meta
+
+
+def _server_meta() -> dict[str, Any]:
+    return {
+        "server_instance_id": SERVER_INSTANCE_ID,
+        "server_uptime_ms": round((time.monotonic() - SERVER_START_MONO) * 1000, 2),
+    }
 
 
 def _enforce_drive_allowlist(parent_id: str, allow_any_parent: bool) -> str:
@@ -2206,6 +2220,8 @@ async def mcp_health_check(
         }
 
         return {
+            "server_instance_id": SERVER_INSTANCE_ID,
+            "server_uptime_ms": round((time.monotonic() - SERVER_START_MONO) * 1000, 2),
             "user_email": user_email,
             "token_valid": creds.valid,
             "token_expiry": creds.expiry.isoformat() if creds.expiry else None,
@@ -2244,4 +2260,10 @@ if __name__ == "__main__":
 
         return host_override
 
-    uvicorn.run(build_app, host=MCP_BIND_ADDRESS, port=MCP_HTTP_PORT, factory=True)
+    uvicorn.run(
+        build_app,
+        host=MCP_BIND_ADDRESS,
+        port=MCP_HTTP_PORT,
+        factory=True,
+        workers=MCP_WORKERS,
+    )
