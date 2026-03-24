@@ -9,6 +9,33 @@ Unified Google Workspace MCP server for Drive, Docs, Sheets, and Slides.
 - Curated tools for common Drive/Docs/Sheets/Slides operations
 - `google_raw_request` advanced/debug passthrough for Google API endpoints
 
+## Hosted MCP (Strict BYOK)
+
+Canonical hosted endpoint:
+
+```
+https://google-mcp.madpanda3d.com/mcp
+```
+
+Deprecated endpoint:
+
+```
+https://google-mcp.madpanda3d.com/mcp/
+```
+
+`/mcp/` returns `410 Gone` with a migration message.
+
+Required request headers for hosted mode:
+
+- MCP transport:
+  - `Content-Type: application/json` (POST)
+  - `Accept: application/json` (POST)
+  - `Accept: text/event-stream` (GET stream)
+- BYOK credential headers (required on every `/mcp` request):
+  - `X-Google-Client-Id`
+  - `X-Google-Client-Secret`
+  - `X-Google-Refresh-Token`
+
 ## Setup
 
 ### 1) Create OAuth credentials
@@ -60,6 +87,17 @@ MCP_BIND_ADDRESS=0.0.0.0
 GOOGLE_CREDENTIALS_PATH=fastmcp/.google/credentials.json
 GOOGLE_TOKEN_PATH=fastmcp/.google/token.json
 GOOGLE_SCOPES=... (same as above)
+MCP_RAW_STRICT=true
+MCP_ALLOW_REQUEST_OVERRIDES=true
+MCP_REQUIRE_REQUEST_GOOGLE_CLIENT_ID=true
+MCP_REQUIRE_REQUEST_GOOGLE_CLIENT_SECRET=true
+MCP_REQUIRE_REQUEST_GOOGLE_REFRESH_TOKEN=true
+MCP_DISABLE_DEFAULT_GOOGLE_FALLBACK=true
+MCP_GOOGLE_CLIENT_ID_HEADER=x-google-client-id
+MCP_GOOGLE_CLIENT_SECRET_HEADER=x-google-client-secret
+MCP_GOOGLE_REFRESH_TOKEN_HEADER=x-google-refresh-token
+MCP_BYOK_CLIENT_CACHE_SIZE=256
+MCP_BYOK_CLIENT_CACHE_TTL_SECONDS=900
 ```
 
 If you add or change scopes later, rerun `google_auth_local.py` and copy the new
@@ -89,7 +127,13 @@ attaches it there.
 In n8n:
 
 1. Add an MCP client node (search for "MCP").  
-2. Set the server URL to `http://google-mcp:8086/mcp`.  
+2. Set the server URL to `http://google-mcp:8086/mcp`.
+3. Set server transport to `HTTP streamable`.
+4. Set auth type to `Multiple Headers Auth`.
+5. Add:
+   - `X-Google-Client-Id`
+   - `X-Google-Client-Secret`
+   - `X-Google-Refresh-Token`
 
 If you are connecting from outside Docker, use:
 
@@ -204,5 +248,6 @@ Note: `google_raw_request` is powerful but easy to misuse. Prefer the curated to
 
 ## Notes
 
-- The server uses the refresh token in `token.json` to auto-refresh access tokens.
-- If the token expires without a refresh token, rerun `google_auth_local.py` locally.
+- In strict hosted mode (`MCP_DISABLE_DEFAULT_GOOGLE_FALLBACK=true`) the server requires BYOK headers and does not use server `token.json` for `/mcp` requests.
+- For local/dev fallback mode, the server can still use the refresh token in `token.json` to auto-refresh access tokens.
+- If a refresh token expires or is revoked, rerun `google_auth_local.py` locally to generate a new token.

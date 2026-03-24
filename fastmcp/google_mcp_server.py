@@ -1,5 +1,7 @@
 import asyncio
 import base64
+import contextvars
+import hashlib
 import io
 import json
 import logging
@@ -9,6 +11,8 @@ import threading
 import time
 import urllib.parse
 import uuid
+from collections import OrderedDict
+from dataclasses import dataclass
 from email.message import EmailMessage
 from typing import Any, Callable
 
@@ -53,6 +57,7 @@ DEFAULT_GMAIL_METADATA_HEADERS = (
 
 MCP_HTTP_PORT = int(os.getenv("MCP_HTTP_PORT", "8086"))
 MCP_BIND_ADDRESS = os.getenv("MCP_BIND_ADDRESS", "0.0.0.0")
+GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token"
 GOOGLE_CREDENTIALS_PATH = os.getenv(
     "GOOGLE_CREDENTIALS_PATH", "fastmcp/.google/credentials.json"
 )
@@ -77,9 +82,38 @@ MCP_REQUIRE_CONFIRM = os.getenv("MCP_REQUIRE_CONFIRM", "").lower() in {
 }
 MCP_DRIVE_ALLOWLIST_PARENT_ID = os.getenv("MCP_DRIVE_ALLOWLIST_PARENT_ID", "")
 DEFAULT_MAX_DOWNLOAD_BYTES = int(os.getenv("MCP_MAX_DOWNLOAD_BYTES", "5000000"))
-MCP_RAW_STRICT = os.getenv("MCP_RAW_STRICT", "").lower() in {"1", "true", "yes"}
+MCP_RAW_STRICT = os.getenv("MCP_RAW_STRICT", "true").lower() in {"1", "true", "yes"}
 MCP_SERVER_VERSION = os.getenv("MCP_SERVER_VERSION", "unknown")
 MCP_STRICT_PARAMS = os.getenv("MCP_STRICT_PARAMS", "").lower() in {"1", "true", "yes"}
+MCP_ALLOW_REQUEST_OVERRIDES = os.getenv(
+    "MCP_ALLOW_REQUEST_OVERRIDES", "true"
+).lower() in {"1", "true", "yes"}
+MCP_REQUIRE_REQUEST_GOOGLE_CLIENT_ID = os.getenv(
+    "MCP_REQUIRE_REQUEST_GOOGLE_CLIENT_ID", "true"
+).lower() in {"1", "true", "yes"}
+MCP_REQUIRE_REQUEST_GOOGLE_CLIENT_SECRET = os.getenv(
+    "MCP_REQUIRE_REQUEST_GOOGLE_CLIENT_SECRET", "true"
+).lower() in {"1", "true", "yes"}
+MCP_REQUIRE_REQUEST_GOOGLE_REFRESH_TOKEN = os.getenv(
+    "MCP_REQUIRE_REQUEST_GOOGLE_REFRESH_TOKEN", "true"
+).lower() in {"1", "true", "yes"}
+MCP_DISABLE_DEFAULT_GOOGLE_FALLBACK = os.getenv(
+    "MCP_DISABLE_DEFAULT_GOOGLE_FALLBACK", "true"
+).lower() in {"1", "true", "yes"}
+MCP_GOOGLE_CLIENT_ID_HEADER = os.getenv(
+    "MCP_GOOGLE_CLIENT_ID_HEADER", "x-google-client-id"
+).strip().lower()
+MCP_GOOGLE_CLIENT_SECRET_HEADER = os.getenv(
+    "MCP_GOOGLE_CLIENT_SECRET_HEADER", "x-google-client-secret"
+).strip().lower()
+MCP_GOOGLE_REFRESH_TOKEN_HEADER = os.getenv(
+    "MCP_GOOGLE_REFRESH_TOKEN_HEADER", "x-google-refresh-token"
+).strip().lower()
+MCP_BYOK_CLIENT_CACHE_SIZE = max(int(os.getenv("MCP_BYOK_CLIENT_CACHE_SIZE", "256")), 0)
+MCP_BYOK_CLIENT_CACHE_TTL_SECONDS = max(
+    float(os.getenv("MCP_BYOK_CLIENT_CACHE_TTL_SECONDS", "900")),
+    0.0,
+)
 
 SERVER_START_TIME = time.time()
 SERVER_START_MONO = time.monotonic()
@@ -109,16 +143,28 @@ def parse_scopes(raw: str) -> list[str]:
 
 
 class GoogleWorkspaceClient:
-    def __init__(self, credentials_path: str, token_path: str, scopes: list[str]):
+    def __init__(
+        self,
+        credentials_path: str | None,
+        token_path: str | None,
+        scopes: list[str],
+        *,
+        authorized_user_info: dict[str, str] | None = None,
+        persist_token: bool = True,
+    ):
         self.credentials_path = credentials_path
         self.token_path = token_path
         self.scopes = scopes
+        self.authorized_user_info = authorized_user_info
+        self.persist_token = persist_token
         self._lock = threading.Lock()
         self._creds: Credentials | None = None
         self._service_cache: dict[tuple[str, str], Any] = {}
         self._session: AuthorizedSession | None = None
 
     def _save_token(self, creds: Credentials) -> None:
+        if not self.persist_token or not self.token_path:
+            return
         token_dir = os.path.dirname(self.token_path)
         if token_dir:
             os.makedirs(token_dir, exist_ok=True)
@@ -128,13 +174,19 @@ class GoogleWorkspaceClient:
     def _load_credentials(self) -> Credentials:
         with self._lock:
             if self._creds is None:
-                if not os.path.exists(self.token_path):
-                    raise FileNotFoundError(
-                        "Missing token.json. Run fastmcp/google_auth_local.py locally and copy it to the server."
+                if self.authorized_user_info:
+                    self._creds = Credentials.from_authorized_user_info(
+                        self.authorized_user_info,
+                        self.scopes,
                     )
-                self._creds = Credentials.from_authorized_user_file(
-                    self.token_path, self.scopes
-                )
+                else:
+                    if not self.token_path or not os.path.exists(self.token_path):
+                        raise FileNotFoundError(
+                            "Missing token.json. Run fastmcp/google_auth_local.py locally and copy it to the server."
+                        )
+                    self._creds = Credentials.from_authorized_user_file(
+                        self.token_path, self.scopes
+                    )
             creds = self._creds
             if not creds.valid:
                 if creds.expired and creds.refresh_token:
@@ -182,15 +234,197 @@ class GoogleWorkspaceClient:
             return self._session is not None
 
 
+@dataclass(frozen=True)
+class RequestGoogleOverrides:
+    client_id: str
+    client_secret: str
+    refresh_token: str
+
+
+class ByokClientCache:
+    def __init__(self, max_size: int, ttl_seconds: float):
+        self.max_size = max(0, max_size)
+        self.ttl_seconds = max(0.0, ttl_seconds)
+        self._lock = threading.Lock()
+        self._cache: OrderedDict[str, tuple[GoogleWorkspaceClient, float]] = OrderedDict()
+
+    def _prune_locked(self, now_mono: float) -> None:
+        expired = [
+            cache_key
+            for cache_key, (_, expires_at) in self._cache.items()
+            if expires_at <= now_mono
+        ]
+        for cache_key in expired:
+            self._cache.pop(cache_key, None)
+
+    def get_or_create(
+        self,
+        cache_key: str,
+        factory: Callable[[], GoogleWorkspaceClient],
+    ) -> tuple[GoogleWorkspaceClient, bool]:
+        if self.max_size <= 0 or self.ttl_seconds <= 0:
+            return factory(), False
+
+        now_mono = time.monotonic()
+        with self._lock:
+            self._prune_locked(now_mono)
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                client_obj, expires_at = cached
+                if expires_at > now_mono:
+                    self._cache.move_to_end(cache_key)
+                    return client_obj, True
+                self._cache.pop(cache_key, None)
+
+        client_obj = factory()
+        now_mono = time.monotonic()
+        with self._lock:
+            self._prune_locked(now_mono)
+            self._cache[cache_key] = (client_obj, now_mono + self.ttl_seconds)
+            self._cache.move_to_end(cache_key)
+            while len(self._cache) > self.max_size:
+                self._cache.popitem(last=False)
+        return client_obj, False
+
+
+def _build_authorized_user_info(overrides: RequestGoogleOverrides) -> dict[str, str]:
+    return {
+        "client_id": overrides.client_id,
+        "client_secret": overrides.client_secret,
+        "refresh_token": overrides.refresh_token,
+        "token_uri": GOOGLE_TOKEN_URI,
+        "type": "authorized_user",
+    }
+
+
+def _fingerprint_request_overrides(overrides: RequestGoogleOverrides) -> str:
+    digest_source = "\n".join(
+        (
+            overrides.client_id,
+            overrides.client_secret,
+            overrides.refresh_token,
+            " ".join(SCOPES),
+        )
+    ).encode("utf-8")
+    return hashlib.sha256(digest_source).hexdigest()
+
+
+def _normalize_header_map(header_items: list[tuple[bytes, bytes]]) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for key, value in header_items:
+        try:
+            key_text = key.decode("utf-8", errors="ignore").strip().lower()
+            value_text = value.decode("utf-8", errors="ignore").strip()
+        except Exception:
+            continue
+        if key_text:
+            normalized[key_text] = value_text
+    return normalized
+
+
+def _build_request_overrides(headers: dict[str, str]) -> RequestGoogleOverrides | None:
+    if not MCP_ALLOW_REQUEST_OVERRIDES:
+        return None
+
+    client_id = headers.get(MCP_GOOGLE_CLIENT_ID_HEADER, "")
+    client_secret = headers.get(MCP_GOOGLE_CLIENT_SECRET_HEADER, "")
+    refresh_token = headers.get(MCP_GOOGLE_REFRESH_TOKEN_HEADER, "")
+    missing_required: list[str] = []
+    if MCP_REQUIRE_REQUEST_GOOGLE_CLIENT_ID and not client_id:
+        missing_required.append(MCP_GOOGLE_CLIENT_ID_HEADER)
+    if MCP_REQUIRE_REQUEST_GOOGLE_CLIENT_SECRET and not client_secret:
+        missing_required.append(MCP_GOOGLE_CLIENT_SECRET_HEADER)
+    if MCP_REQUIRE_REQUEST_GOOGLE_REFRESH_TOKEN and not refresh_token:
+        missing_required.append(MCP_GOOGLE_REFRESH_TOKEN_HEADER)
+    if missing_required:
+        raise ValueError("Missing required header(s): " + ", ".join(missing_required) + ".")
+
+    if not any((client_id, client_secret, refresh_token)):
+        return None
+
+    if not all((client_id, client_secret, refresh_token)):
+        raise ValueError(
+            "Partial Google BYOK headers supplied. Provide all of: "
+            + ", ".join(
+                [
+                    MCP_GOOGLE_CLIENT_ID_HEADER,
+                    MCP_GOOGLE_CLIENT_SECRET_HEADER,
+                    MCP_GOOGLE_REFRESH_TOKEN_HEADER,
+                ]
+            )
+            + "."
+        )
+
+    return RequestGoogleOverrides(
+        client_id=client_id,
+        client_secret=client_secret,
+        refresh_token=refresh_token,
+    )
+
+
+def _resolve_request_client(
+    header_items: list[tuple[bytes, bytes]],
+) -> tuple[GoogleWorkspaceClient | None, dict[str, Any]]:
+    headers = _normalize_header_map(header_items)
+    overrides = _build_request_overrides(headers)
+    if overrides is None:
+        if MCP_DISABLE_DEFAULT_GOOGLE_FALLBACK:
+            missing = [
+                MCP_GOOGLE_CLIENT_ID_HEADER,
+                MCP_GOOGLE_CLIENT_SECRET_HEADER,
+                MCP_GOOGLE_REFRESH_TOKEN_HEADER,
+            ]
+            raise ValueError("Missing required header(s): " + ", ".join(missing) + ".")
+        return None, {"auth_mode": "default_credentials"}
+
+    cache_key = _fingerprint_request_overrides(overrides)
+    byok_client, cache_hit = BYOK_CLIENT_CACHE.get_or_create(
+        cache_key,
+        lambda: GoogleWorkspaceClient(
+            credentials_path=None,
+            token_path=None,
+            scopes=SCOPES,
+            authorized_user_info=_build_authorized_user_info(overrides),
+            persist_token=False,
+        ),
+    )
+    return byok_client, {"auth_mode": "byok", "byok_cache_hit": cache_hit}
+
+
+class ActiveClientProxy:
+    def __init__(self, default_client: GoogleWorkspaceClient):
+        self.default_client = default_client
+
+    def _resolve(self) -> GoogleWorkspaceClient:
+        request_client = ACTIVE_GOOGLE_CLIENT.get()
+        return request_client or self.default_client
+
+    def __getattr__(self, item: str):
+        return getattr(self._resolve(), item)
+
+
 SCOPES = parse_scopes(GOOGLE_SCOPES_RAW)
 if not SCOPES:
     raise RuntimeError("GOOGLE_SCOPES is not set")
 
-client = GoogleWorkspaceClient(
+if MCP_DISABLE_DEFAULT_GOOGLE_FALLBACK and not MCP_ALLOW_REQUEST_OVERRIDES:
+    raise RuntimeError(
+        "MCP_DISABLE_DEFAULT_GOOGLE_FALLBACK=true requires MCP_ALLOW_REQUEST_OVERRIDES=true."
+    )
+
+DEFAULT_CLIENT = GoogleWorkspaceClient(
     credentials_path=GOOGLE_CREDENTIALS_PATH,
     token_path=GOOGLE_TOKEN_PATH,
     scopes=SCOPES,
 )
+BYOK_CLIENT_CACHE = ByokClientCache(
+    max_size=MCP_BYOK_CLIENT_CACHE_SIZE,
+    ttl_seconds=MCP_BYOK_CLIENT_CACHE_TTL_SECONDS,
+)
+ACTIVE_GOOGLE_CLIENT: contextvars.ContextVar[GoogleWorkspaceClient | None] = (
+    contextvars.ContextVar("active_google_client", default=None)
+)
+client = ActiveClientProxy(DEFAULT_CLIENT)
 
 
 def normalize_url(url: str) -> str:
@@ -2312,6 +2546,218 @@ async def mcp_health_check(
     return await run_tool("mcp", "health_check", _health_check, allow_retry=False)
 
 
+def _extract_header_from_scope(scope: dict[str, Any], name: str) -> str:
+    target = name.lower().encode("utf-8")
+    for key, value in scope.get("headers", []):
+        if key.lower() == target:
+            return value.decode("utf-8", errors="ignore")
+    return ""
+
+
+def _safe_parse_json(body: bytes) -> dict[str, Any] | None:
+    if not body:
+        return {}
+    try:
+        payload = json.loads(body)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _extract_jsonrpc_id(payload: dict[str, Any] | None) -> str | int:
+    if not isinstance(payload, dict):
+        return "server-error"
+    candidate = payload.get("id", "server-error")
+    if isinstance(candidate, (str, int)):
+        return candidate
+    return "server-error"
+
+
+async def _read_request_body(receive) -> bytes:
+    chunks: list[bytes] = []
+    while True:
+        message = await receive()
+        if message.get("type") != "http.request":
+            continue
+        body = message.get("body") or b""
+        if body:
+            chunks.append(body)
+        if not message.get("more_body", False):
+            break
+    return b"".join(chunks)
+
+
+def _replay_receive(body: bytes):
+    emitted = False
+
+    async def _inner():
+        nonlocal emitted
+        if not emitted:
+            emitted = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    return _inner
+
+
+async def _send_json(
+    send,
+    status: int,
+    payload: dict[str, Any],
+    *,
+    extra_headers: list[tuple[bytes, bytes]] | None = None,
+) -> None:
+    body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    headers = [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode("ascii")),
+    ]
+    if extra_headers:
+        headers.extend(extra_headers)
+    await send({"type": "http.response.start", "status": status, "headers": headers})
+    await send({"type": "http.response.body", "body": body})
+
+
+async def _send_jsonrpc_error(
+    send,
+    *,
+    status: int,
+    code: int,
+    message: str,
+    request_id: str | int,
+    data: dict[str, Any] | None = None,
+) -> None:
+    payload: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+    if data is not None:
+        payload["error"]["data"] = data
+    await _send_json(send, status, payload)
+
+
+def _accepts_media_type(accept_header: str, media_type: str) -> bool:
+    if not accept_header:
+        return False
+    target = media_type.lower()
+    for item in accept_header.lower().split(","):
+        value = item.strip().split(";", 1)[0].strip()
+        if not value:
+            continue
+        if value == "*/*" or value == target:
+            return True
+        if value.endswith("/*"):
+            prefix = value[:-1]
+            if target.startswith(prefix):
+                return True
+    return False
+
+
+def build_hosted_mcp_http_wrapper(app):
+    async def _wrapped(scope, receive, send):
+        if scope.get("type") != "http":
+            await app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        method = str(scope.get("method", "")).upper()
+
+        if path == "/mcp/":
+            await _send_json(
+                send,
+                410,
+                {
+                    "error": "deprecated_endpoint",
+                    "message": "Deprecated MCP URL. Use /mcp (remove trailing slash).",
+                },
+                extra_headers=[(b"cache-control", b"no-store")],
+            )
+            return
+
+        if path != "/mcp":
+            await app(scope, receive, send)
+            return
+
+        jsonrpc_id: str | int = "server-error"
+        body = b""
+        consumed_body = False
+        if method in {"POST", "PUT", "PATCH"}:
+            body = await _read_request_body(receive)
+            consumed_body = True
+            payload = _safe_parse_json(body)
+            if payload is None:
+                await _send_jsonrpc_error(
+                    send,
+                    status=400,
+                    code=-32600,
+                    message="Bad Request: body must be valid JSON-RPC object",
+                    request_id=jsonrpc_id,
+                )
+                return
+            jsonrpc_id = _extract_jsonrpc_id(payload)
+
+        if method == "POST":
+            content_type = _extract_header_from_scope(scope, "content-type").lower()
+            if "application/json" not in content_type:
+                await _send_jsonrpc_error(
+                    send,
+                    status=400,
+                    code=-32600,
+                    message="Bad Request: Content-Type must include application/json",
+                    request_id=jsonrpc_id,
+                )
+                return
+            accept = _extract_header_from_scope(scope, "accept")
+            if not _accepts_media_type(accept, "application/json"):
+                await _send_jsonrpc_error(
+                    send,
+                    status=406,
+                    code=-32600,
+                    message="Not Acceptable: Client must accept application/json",
+                    request_id=jsonrpc_id,
+                )
+                return
+
+        if method == "GET":
+            accept = _extract_header_from_scope(scope, "accept")
+            if not _accepts_media_type(accept, "text/event-stream"):
+                await _send_jsonrpc_error(
+                    send,
+                    status=406,
+                    code=-32600,
+                    message="Not Acceptable: Client must accept text/event-stream",
+                    request_id=jsonrpc_id,
+                )
+                return
+
+        try:
+            request_client, _ = _resolve_request_client(scope.get("headers", []) or [])
+        except ValueError as exc:
+            await _send_jsonrpc_error(
+                send,
+                status=401,
+                code=-32001,
+                message=str(exc),
+                request_id=jsonrpc_id,
+                data={
+                    "required_headers": [
+                        MCP_GOOGLE_CLIENT_ID_HEADER,
+                        MCP_GOOGLE_CLIENT_SECRET_HEADER,
+                        MCP_GOOGLE_REFRESH_TOKEN_HEADER,
+                    ],
+                },
+            )
+            return
+
+        token = ACTIVE_GOOGLE_CLIENT.set(request_client)
+        try:
+            next_receive = _replay_receive(body) if consumed_body else receive
+            await app(scope, next_receive, send)
+        finally:
+            ACTIVE_GOOGLE_CLIENT.reset(token)
+
+    return _wrapped
+
+
 if __name__ == "__main__":
     os.environ.setdefault("HOST", MCP_BIND_ADDRESS)
     os.environ.setdefault("PORT", str(MCP_HTTP_PORT))
@@ -2323,19 +2769,7 @@ if __name__ == "__main__":
             app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
         except Exception:
             pass
-
-        async def host_override(scope, receive, send):
-            if scope["type"] == "http":
-                headers = []
-                for key, value in scope.get("headers", []):
-                    if key.lower() == b"host":
-                        continue
-                    headers.append((key, value))
-                headers.append((b"host", b"localhost"))
-                scope = {**scope, "headers": headers}
-            await app(scope, receive, send)
-
-        return host_override
+        return build_hosted_mcp_http_wrapper(app)
 
     uvicorn.run(
         build_app,

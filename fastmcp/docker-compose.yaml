@@ -9,8 +9,8 @@ services:
     ports:
       - "8086:8086"
     networks:
-      - npm_default
+      - mcp-network
 
 networks:
-  npm_default:
+  mcp-network:
     external: true
