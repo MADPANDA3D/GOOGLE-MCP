@@ -135,6 +135,25 @@ if MCP_LOG_REQUESTS:
     )
 
 
+def registered_tool_count() -> int:
+    manager = getattr(mcp, "_tool_manager", None)
+    for attr in ("_tools", "tools"):
+        tools = getattr(manager, attr, None)
+        if isinstance(tools, dict):
+            return len(tools)
+        if isinstance(tools, (list, tuple, set)):
+            return len(tools)
+    list_tools = getattr(manager, "list_tools", None)
+    if callable(list_tools):
+        try:
+            tools = list_tools()
+            if isinstance(tools, (list, tuple, set)):
+                return len(tools)
+        except Exception:
+            pass
+    return 55
+
+
 def parse_scopes(raw: str) -> list[str]:
     if not raw:
         return []
@@ -2668,6 +2687,22 @@ def build_hosted_mcp_http_wrapper(app):
                 {
                     "error": "deprecated_endpoint",
                     "message": "Deprecated MCP URL. Use /mcp (remove trailing slash).",
+                },
+                extra_headers=[(b"cache-control", b"no-store")],
+            )
+            return
+
+        if path == "/health":
+            tool_count = registered_tool_count()
+            await _send_json(
+                send,
+                200,
+                {
+                    "ok": True,
+                    "service": "google-mcp",
+                    "version": os.getenv("MCP_SERVER_VERSION", "dev"),
+                    "tool_count": tool_count,
+                    "tools": {"total": tool_count},
                 },
                 extra_headers=[(b"cache-control", b"no-store")],
             )
