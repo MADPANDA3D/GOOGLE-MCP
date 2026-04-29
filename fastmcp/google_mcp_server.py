@@ -2,11 +2,13 @@ import asyncio
 import base64
 import contextvars
 import hashlib
+import hmac
 import io
 import json
 import logging
 import os
 import random
+import re
 import threading
 import time
 import urllib.parse
@@ -23,6 +25,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaInMemoryUpload
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 import uvicorn
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -109,11 +112,16 @@ MCP_GOOGLE_CLIENT_SECRET_HEADER = os.getenv(
 MCP_GOOGLE_REFRESH_TOKEN_HEADER = os.getenv(
     "MCP_GOOGLE_REFRESH_TOKEN_HEADER", "x-google-refresh-token"
 ).strip().lower()
+MCP_PORTAL_GRANT_HEADER = os.getenv(
+    "MCP_PORTAL_GRANT_HEADER", "x-madpanda-portal-grant"
+).strip().lower()
+MCP_PORTAL_GRANT_TOKEN = os.getenv("MCP_PORTAL_GRANT_TOKEN", "")
 MCP_BYOK_CLIENT_CACHE_SIZE = max(int(os.getenv("MCP_BYOK_CLIENT_CACHE_SIZE", "256")), 0)
 MCP_BYOK_CLIENT_CACHE_TTL_SECONDS = max(
     float(os.getenv("MCP_BYOK_CLIENT_CACHE_TTL_SECONDS", "900")),
     0.0,
 )
+EXPECTED_TOOL_COUNT = 59
 
 SERVER_START_TIME = time.time()
 SERVER_START_MONO = time.monotonic()
@@ -151,7 +159,7 @@ def registered_tool_count() -> int:
                 return len(tools)
         except Exception:
             pass
-    return 55
+    return EXPECTED_TOOL_COUNT
 
 
 def parse_scopes(raw: str) -> list[str]:
@@ -809,6 +817,841 @@ def _extract_gmail_bodies(payload: dict[str, Any] | None) -> dict[str, str]:
 
 async def run_blocking(func, *args, **kwargs):
     return await asyncio.to_thread(func, *args, **kwargs)
+
+
+READ_GOOGLE_TOOL = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=True,
+)
+WRITE_GOOGLE_TOOL = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=False,
+    openWorldHint=True,
+)
+DESTRUCTIVE_GOOGLE_TOOL = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=True,
+    idempotentHint=False,
+    openWorldHint=True,
+)
+NAVIGATION_TOOL = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+)
+
+READ_ONLY_TOOLS = {
+    "drive_list_files",
+    "drive_search_files",
+    "drive_batch_get_metadata",
+    "drive_get_file",
+    "drive_download_file",
+    "docs_get_document",
+    "sheets_get_spreadsheet",
+    "sheets_get_values",
+    "sheets_batch_get_values",
+    "slides_get_presentation",
+    "gmail_list_labels",
+    "gmail_list_messages",
+    "gmail_search_messages",
+    "gmail_get_message",
+    "gmail_get_message_headers",
+    "gmail_get_message_body",
+    "gmail_batch_get_metadata",
+    "gmail_list_threads",
+    "gmail_get_thread",
+    "calendar_list_calendars",
+    "calendar_get_calendar",
+    "calendar_list_events",
+    "calendar_search_events",
+    "calendar_batch_get_events",
+    "calendar_get_event",
+    "mcp_health_check",
+}
+WRITE_TOOLS = {
+    "drive_create_folder",
+    "drive_upload_file",
+    "docs_create_document",
+    "docs_insert_text",
+    "sheets_create_spreadsheet",
+    "slides_create_presentation",
+    "gmail_create_label",
+    "gmail_create_draft",
+    "gmail_untrash_message",
+    "calendar_create_calendar",
+    "calendar_create_event",
+    "calendar_quick_add",
+}
+DESTRUCTIVE_TOOLS = {
+    "google_raw_request",
+    "drive_delete_file",
+    "drive_empty_trash",
+    "drive_purge_trash",
+    "docs_replace_text",
+    "sheets_update_values",
+    "slides_replace_text",
+    "gmail_delete_label",
+    "gmail_send_message",
+    "gmail_send_raw_message",
+    "gmail_send_draft",
+    "gmail_modify_message_labels",
+    "gmail_trash_message",
+    "gmail_delete_message",
+    "calendar_delete_calendar",
+    "calendar_update_event",
+    "calendar_delete_event",
+}
+NAVIGATION_TOOLS = {
+    "google_mcp_welcome",
+    "google_mcp_list_capabilities",
+    "google_mcp_get_endpoint_coverage",
+    "google_mcp_get_tool_usage",
+}
+
+TOOL_DESCRIPTIONS = {
+    "google_raw_request": (
+        "Use this advanced Google API escape hatch only when a documented endpoint is "
+        "not covered by a curated tool. It can read, write, or delete Google data "
+        "depending on the HTTP method and URL, and returns a bounded HTTP response."
+    ),
+    "drive_list_files": (
+        "Use this read-only Google Drive tool to list accessible files with optional "
+        "query, ordering, pagination, and fields selection. Returns compact file "
+        "metadata plus pagination metadata."
+    ),
+    "drive_search_files": (
+        "Use this read-only Google Drive tool when you have a Drive query string and "
+        "need matching files. Returns compact file metadata and the next page token."
+    ),
+    "drive_batch_get_metadata": (
+        "Use this read-only Google Drive tool to fetch metadata for known file IDs in "
+        "one call. Prefer fields selection to keep output small."
+    ),
+    "drive_get_file": (
+        "Use this read-only Google Drive tool to fetch metadata for one known file ID. "
+        "Returns ID, name, MIME type, parents, and other requested fields."
+    ),
+    "drive_create_folder": (
+        "Use this Google Drive write tool to create a folder, optionally under a "
+        "parent folder. It writes a new Drive folder and returns its ID and name."
+    ),
+    "drive_upload_file": (
+        "Use this Google Drive write tool to upload text or base64 content as a new "
+        "file. It creates a Drive file and returns its ID, name, MIME type, and parents."
+    ),
+    "drive_download_file": (
+        "Use this read-only Google Drive tool to get a download/export URL or bounded "
+        "base64 content for a file. Prefer return_mode='url' unless bytes are required."
+    ),
+    "drive_delete_file": (
+        "Use this Google Drive destructive tool to trash a file or permanently delete "
+        "one with confirm=true. Permanent deletion cannot be recovered through this MCP."
+    ),
+    "drive_empty_trash": (
+        "Use this destructive Google Drive tool only to permanently delete all trashed "
+        "files after confirm=true. It affects the authenticated user's trash."
+    ),
+    "drive_purge_trash": (
+        "Compatibility alias for drive_empty_trash. Use only with confirm=true when the "
+        "user explicitly wants Drive trash permanently emptied."
+    ),
+    "docs_create_document": (
+        "Use this Google Docs write tool to create a blank document by title. It writes "
+        "a new Doc and returns the provider response."
+    ),
+    "docs_get_document": (
+        "Use this read-only Google Docs tool to fetch one document by ID. Use fields to "
+        "avoid returning full document structure unless needed."
+    ),
+    "docs_insert_text": (
+        "Use this Google Docs write tool to insert text at a document index. It changes "
+        "the target document and returns the batchUpdate response."
+    ),
+    "docs_replace_text": (
+        "Use this destructive Google Docs tool to replace matching document text. It can "
+        "overwrite content across the document and returns the batchUpdate response."
+    ),
+    "sheets_create_spreadsheet": (
+        "Use this Google Sheets write tool to create a blank spreadsheet by title. It "
+        "writes a new Sheet and returns the provider response."
+    ),
+    "sheets_get_spreadsheet": (
+        "Use this read-only Google Sheets tool to fetch spreadsheet metadata. Use fields "
+        "to keep responses compact."
+    ),
+    "sheets_get_values": (
+        "Use this read-only Google Sheets values tool to read one A1 range from a "
+        "spreadsheet. Returns the values response from Google."
+    ),
+    "sheets_batch_get_values": (
+        "Use this read-only Google Sheets values tool to read multiple A1 ranges in one "
+        "call. Returns range values and render metadata."
+    ),
+    "sheets_update_values": (
+        "Use this destructive Google Sheets values tool to overwrite cells in one A1 "
+        "range. It writes values and returns update counts."
+    ),
+    "slides_create_presentation": (
+        "Use this Google Slides write tool to create a blank presentation by title. It "
+        "writes a new deck and returns the provider response."
+    ),
+    "slides_get_presentation": (
+        "Use this read-only Google Slides tool to fetch presentation metadata and slide "
+        "IDs. Use fields for compact output."
+    ),
+    "slides_replace_text": (
+        "Use this destructive Google Slides tool to replace matching text throughout a "
+        "presentation. It can overwrite slide content."
+    ),
+    "gmail_list_labels": (
+        "Use this read-only Gmail tool to list labels for the authenticated mailbox. It "
+        "defaults to compact label IDs and names."
+    ),
+    "gmail_create_label": (
+        "Use this Gmail write tool to create a mailbox label. It writes a new label and "
+        "returns the label resource."
+    ),
+    "gmail_delete_label": (
+        "Use this destructive Gmail tool to delete a mailbox label. Set confirm=true "
+        "when confirmation is required by runtime config."
+    ),
+    "gmail_list_messages": (
+        "Use this read-only Gmail tool to list message IDs by query or label. It returns "
+        "message stubs and pagination, not full message bodies."
+    ),
+    "gmail_search_messages": (
+        "Use this read-only Gmail tool when you have a Gmail search query and need "
+        "matching message IDs. Fetch bodies separately only when needed."
+    ),
+    "gmail_get_message": (
+        "Use this read-only Gmail tool to fetch one message by ID. It defaults to "
+        "metadata to avoid large or private body output."
+    ),
+    "gmail_get_message_headers": (
+        "Use this read-only Gmail tool to fetch selected headers for one message. It "
+        "returns a compact header map, snippet, labels, and thread ID."
+    ),
+    "gmail_get_message_body": (
+        "Use this read-only Gmail tool to extract text/plain or text/html body content "
+        "for one message when the user has asked to inspect email content."
+    ),
+    "gmail_batch_get_metadata": (
+        "Use this read-only Gmail tool to fetch metadata for multiple message IDs. It "
+        "accepts snake_case arguments and common camelCase aliases through the MCP wrapper."
+    ),
+    "gmail_list_threads": (
+        "Use this read-only Gmail tool to list thread IDs by query or labels. Fetch a "
+        "thread by ID for message-level details."
+    ),
+    "gmail_get_thread": (
+        "Use this read-only Gmail tool to fetch one thread by ID. It defaults to "
+        "metadata to reduce private content exposure."
+    ),
+    "gmail_send_message": (
+        "Use this Gmail irreversible send tool only when the user explicitly approves "
+        "sending. It sends a message from the authenticated mailbox."
+    ),
+    "gmail_send_raw_message": (
+        "Use this Gmail irreversible send tool only for approved raw MIME sends. It "
+        "sends the supplied base64url MIME payload."
+    ),
+    "gmail_create_draft": (
+        "Use this Gmail write tool to create a draft instead of sending. Prefer drafts "
+        "when user approval is still needed."
+    ),
+    "gmail_send_draft": (
+        "Use this Gmail irreversible send tool only after explicit approval to send an "
+        "existing draft."
+    ),
+    "gmail_modify_message_labels": (
+        "Use this destructive Gmail tool to add or remove labels from a message. It "
+        "changes mailbox organization for the target message."
+    ),
+    "gmail_trash_message": (
+        "Use this destructive Gmail tool to move a message to trash. It changes mailbox "
+        "state and may require confirm=true."
+    ),
+    "gmail_untrash_message": (
+        "Use this Gmail write tool to restore a trashed message. It changes mailbox "
+        "state but does not permanently delete data."
+    ),
+    "gmail_delete_message": (
+        "Use this destructive Gmail tool only when the user explicitly requests permanent "
+        "message deletion. It cannot be undone through this MCP."
+    ),
+    "calendar_list_calendars": (
+        "Use this read-only Google Calendar tool to list calendars visible to the user. "
+        "Returns compact calendar metadata and pagination."
+    ),
+    "calendar_get_calendar": (
+        "Use this read-only Google Calendar tool to fetch metadata for one calendar ID. "
+        "Returns summary, timezone, access role, and requested fields."
+    ),
+    "calendar_create_calendar": (
+        "Use this Google Calendar write tool to create a secondary calendar. It writes "
+        "a new calendar and returns the provider response."
+    ),
+    "calendar_delete_calendar": (
+        "Use this destructive Google Calendar tool only when the user explicitly wants "
+        "to delete a calendar. It may require confirm=true."
+    ),
+    "calendar_list_events": (
+        "Use this read-only Google Calendar tool to list events, usually with time_min "
+        "and time_max. The wrapper accepts common camelCase aliases such as timeMin and timeMax."
+    ),
+    "calendar_search_events": (
+        "Use this read-only Google Calendar tool to search events with a query and "
+        "optional time window. Returns compact event metadata and pagination."
+    ),
+    "calendar_batch_get_events": (
+        "Use this read-only Google Calendar tool to fetch multiple known event IDs from "
+        "one calendar. Returns compact event metadata."
+    ),
+    "calendar_get_event": (
+        "Use this read-only Google Calendar tool to fetch one event by calendar ID and "
+        "event ID. Use fields to keep output compact."
+    ),
+    "calendar_create_event": (
+        "Use this Google Calendar write tool to create an event in a calendar. It can "
+        "invite attendees and writes to the authenticated user's calendar."
+    ),
+    "calendar_update_event": (
+        "Use this destructive Google Calendar tool to patch an existing event. It can "
+        "overwrite event details and send attendee updates."
+    ),
+    "calendar_delete_event": (
+        "Use this destructive Google Calendar tool to delete an event. It may notify "
+        "attendees depending on send_updates and requires confirmed intent."
+    ),
+    "calendar_quick_add": (
+        "Use this Google Calendar write tool to create an event from natural language "
+        "text. Prefer explicit create_event when dates or attendees must be controlled."
+    ),
+    "mcp_health_check": (
+        "Use this diagnostic tool to verify Google OAuth readiness, scopes, cache state, "
+        "and optional safe API checks. It never returns credential values."
+    ),
+    "google_mcp_welcome": (
+        "Use this read-only navigation tool first to understand Google MCP setup, tool "
+        "groups, safety rules, and recommended next discovery calls."
+    ),
+    "google_mcp_list_capabilities": (
+        "Use this read-only navigation tool to list Google provider categories, grouped "
+        "tools, and read/write/destructive risk levels."
+    ),
+    "google_mcp_get_endpoint_coverage": (
+        "Use this read-only navigation tool to inspect endpoint parity against official "
+        "Google REST discovery resources by API, resource, or coverage status."
+    ),
+    "google_mcp_get_tool_usage": (
+        "Use this read-only navigation tool to get usage, side effects, and related "
+        "tools for a specific Google MCP tool."
+    ),
+}
+
+COMMON_PARAMETER_DESCRIPTIONS = {
+    "query": "Provider query string used to filter results.",
+    "page_size": "Maximum number of items to request from Google for this page.",
+    "max_results": "Maximum number of items to request from Google for this page.",
+    "fields": "Optional Google partial-response fields selector for compact output.",
+    "order_by": "Optional provider order expression.",
+    "page_token": "Provider pagination token returned by a previous list call.",
+    "file_id": "Google Drive file ID.",
+    "file_ids": "List of Google Drive file IDs.",
+    "name": "Provider-visible resource name.",
+    "parent_id": "Optional Google Drive parent folder ID.",
+    "allow_any_parent": "Set true only when intentionally bypassing the configured Drive parent allowlist.",
+    "content": "Text content or base64 content to upload.",
+    "mime_type": "MIME type for uploaded content.",
+    "is_base64": "Set true when content is base64 encoded.",
+    "export_mime_type": "MIME type to export Google-native files as.",
+    "include_content": "Set true to include bounded base64 content in the response.",
+    "return_mode": "Return mode for Drive downloads.",
+    "max_bytes": "Maximum bytes to return when including file content.",
+    "range_start": "Optional byte-range start for downloads.",
+    "range_end": "Optional byte-range end for downloads.",
+    "mode": "Deletion mode.",
+    "confirm": "Required true for high-risk operations when confirmation is enforced.",
+    "title": "Provider-visible title for the new resource.",
+    "document_id": "Google Docs document ID.",
+    "text": "Text to insert or quick-add.",
+    "index": "Google Docs structural insertion index.",
+    "contains_text": "Text to find and replace.",
+    "replace_text": "Replacement text.",
+    "match_case": "Whether text matching should be case-sensitive.",
+    "spreadsheet_id": "Google Sheets spreadsheet ID.",
+    "range_a1": "A1 notation range, for example Sheet1!A1:C20.",
+    "ranges": "List of A1 notation ranges.",
+    "value_render_option": "Google Sheets value render option.",
+    "date_time_render_option": "Google Sheets date/time render option.",
+    "major_dimension": "Google Sheets major dimension.",
+    "values": "Two-dimensional array of cell values.",
+    "value_input_option": "How Google Sheets should interpret written values.",
+    "presentation_id": "Google Slides presentation ID.",
+    "label_id": "Gmail label ID.",
+    "label_list_visibility": "Gmail label list visibility value.",
+    "message_list_visibility": "Gmail message list visibility value.",
+    "label_ids": "Gmail label IDs used to filter results.",
+    "include_spam_trash": "Whether to include spam and trash in Gmail list/search results.",
+    "message_id": "Gmail message ID.",
+    "message_ids": "List of Gmail message IDs.",
+    "format": "Gmail message or thread format.",
+    "metadata_headers": "Gmail metadata headers to return.",
+    "headers": "HTTP headers for raw requests or Gmail header names, depending on tool.",
+    "prefer_html": "Return HTML body when available instead of plain text.",
+    "thread_id": "Gmail thread ID.",
+    "to": "Recipient email address list accepted by Gmail.",
+    "subject": "Email subject line.",
+    "body": "Email body content.",
+    "cc": "Optional CC recipients.",
+    "bcc": "Optional BCC recipients.",
+    "reply_to": "Optional Reply-To header.",
+    "from_alias": "Optional configured Gmail send-as alias.",
+    "is_html": "Set true when email body is HTML.",
+    "raw_base64": "Base64url-encoded raw MIME message.",
+    "draft_id": "Gmail draft ID.",
+    "add_label_ids": "Gmail label IDs to add.",
+    "remove_label_ids": "Gmail label IDs to remove.",
+    "calendar_id": "Google Calendar calendar ID, often 'primary'.",
+    "time_min": "Inclusive lower event time bound as RFC3339 timestamp.",
+    "time_max": "Exclusive upper event time bound as RFC3339 timestamp.",
+    "single_events": "Whether recurring events should be expanded into instances.",
+    "event_ids": "List of Google Calendar event IDs.",
+    "event_id": "Google Calendar event ID.",
+    "summary": "Calendar summary or event title.",
+    "description": "Optional provider-visible description.",
+    "time_zone": "IANA time zone such as America/New_York or UTC.",
+    "start_iso": "Event start as RFC3339 date-time or date for all-day events.",
+    "end_iso": "Event end as RFC3339 date-time or date for all-day events.",
+    "location": "Optional event location.",
+    "attendees": "Optional attendee email addresses.",
+    "all_day": "Set true to create all-day date events.",
+    "event_patch": "Google Calendar events.patch request body.",
+    "send_updates": "How Google Calendar should notify attendees.",
+    "run_checks": "Whether to call safe Google API health checks.",
+    "warm_all": "Whether to warm all supported Google service clients.",
+    "doc_id": "Optional document ID for deeper Docs health check.",
+    "sheet_id": "Optional spreadsheet ID for deeper Sheets health check.",
+    "slide_id": "Optional presentation ID for deeper Slides health check.",
+    "method": "HTTP method for google_raw_request.",
+    "url": "Google API URL or relative path for google_raw_request.",
+    "params": "Optional query parameters for google_raw_request.",
+    "json_body": "Optional JSON request body for google_raw_request.",
+    "category": "Optional capability category filter.",
+    "api": "Optional Google API filter such as drive, docs, sheets, slides, gmail, or calendar.",
+    "resource": "Optional provider resource filter such as files, users.messages, or events.",
+    "status": "Optional coverage status filter.",
+    "tool_name": "Google MCP tool name to describe.",
+}
+
+PARAMETER_ENUMS = {
+    "method": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+    "return_mode": ["", "url", "base64", "both"],
+    "mode": ["trash", "permanent"],
+    "format": ["minimal", "metadata", "full", "raw"],
+    "value_input_option": ["RAW", "USER_ENTERED"],
+    "label_list_visibility": ["labelShow", "labelShowIfUnread", "labelHide"],
+    "message_list_visibility": ["show", "hide"],
+    "send_updates": ["all", "externalOnly", "none"],
+    "status": [
+        "",
+        "implemented",
+        "partially_implemented",
+        "missing",
+        "intentionally_excluded",
+        "blocked_scope",
+    ],
+    "api": ["", "drive", "docs", "sheets", "slides", "gmail", "calendar"],
+}
+
+CAPABILITY_GROUPS = [
+    {
+        "category": "Drive API v3 files",
+        "read": [
+            "drive_list_files",
+            "drive_search_files",
+            "drive_batch_get_metadata",
+            "drive_get_file",
+            "drive_download_file",
+        ],
+        "write": ["drive_create_folder", "drive_upload_file"],
+        "destructive": ["drive_delete_file", "drive_empty_trash", "drive_purge_trash"],
+    },
+    {
+        "category": "Docs API v1 documents",
+        "read": ["docs_get_document"],
+        "write": ["docs_create_document", "docs_insert_text"],
+        "destructive": ["docs_replace_text"],
+    },
+    {
+        "category": "Sheets API v4 spreadsheets and values",
+        "read": [
+            "sheets_get_spreadsheet",
+            "sheets_get_values",
+            "sheets_batch_get_values",
+        ],
+        "write": ["sheets_create_spreadsheet"],
+        "destructive": ["sheets_update_values"],
+    },
+    {
+        "category": "Slides API v1 presentations",
+        "read": ["slides_get_presentation"],
+        "write": ["slides_create_presentation"],
+        "destructive": ["slides_replace_text"],
+    },
+    {
+        "category": "Gmail API v1 labels, messages, threads, drafts",
+        "read": [
+            "gmail_list_labels",
+            "gmail_list_messages",
+            "gmail_search_messages",
+            "gmail_get_message",
+            "gmail_get_message_headers",
+            "gmail_get_message_body",
+            "gmail_batch_get_metadata",
+            "gmail_list_threads",
+            "gmail_get_thread",
+        ],
+        "write": ["gmail_create_label", "gmail_create_draft", "gmail_untrash_message"],
+        "destructive": [
+            "gmail_delete_label",
+            "gmail_send_message",
+            "gmail_send_raw_message",
+            "gmail_send_draft",
+            "gmail_modify_message_labels",
+            "gmail_trash_message",
+            "gmail_delete_message",
+        ],
+    },
+    {
+        "category": "Calendar API v3 calendars and events",
+        "read": [
+            "calendar_list_calendars",
+            "calendar_get_calendar",
+            "calendar_list_events",
+            "calendar_search_events",
+            "calendar_batch_get_events",
+            "calendar_get_event",
+        ],
+        "write": [
+            "calendar_create_calendar",
+            "calendar_create_event",
+            "calendar_quick_add",
+        ],
+        "destructive": [
+            "calendar_delete_calendar",
+            "calendar_update_event",
+            "calendar_delete_event",
+        ],
+    },
+    {
+        "category": "MCP navigation and diagnostics",
+        "read": [
+            "google_mcp_welcome",
+            "google_mcp_list_capabilities",
+            "google_mcp_get_endpoint_coverage",
+            "google_mcp_get_tool_usage",
+            "mcp_health_check",
+        ],
+        "write": [],
+        "destructive": ["google_raw_request"],
+    },
+]
+
+ENDPOINT_COVERAGE = [
+    {
+        "api": "drive",
+        "resource": "files",
+        "status": "partially_implemented",
+        "implemented": ["create", "delete", "emptyTrash", "export", "get", "list"],
+        "missing": [
+            "copy",
+            "download",
+            "generateCseToken",
+            "generateIds",
+            "listLabels",
+            "modifyLabels",
+            "update",
+            "watch",
+        ],
+        "tool_refs": [
+            "drive_list_files",
+            "drive_search_files",
+            "drive_get_file",
+            "drive_batch_get_metadata",
+            "drive_create_folder",
+            "drive_upload_file",
+            "drive_download_file",
+            "drive_delete_file",
+            "drive_empty_trash",
+        ],
+    },
+    {
+        "api": "drive",
+        "resource": "about/apps/changes/comments/replies/permissions/drives/revisions/channels",
+        "status": "missing",
+        "implemented": [],
+        "missing": [
+            "about.get",
+            "apps.get",
+            "apps.list",
+            "changes.getStartPageToken",
+            "changes.list",
+            "comments.*",
+            "replies.*",
+            "permissions.*",
+            "drives.*",
+            "revisions.*",
+            "channels.stop",
+        ],
+        "tool_refs": ["google_raw_request"],
+    },
+    {
+        "api": "docs",
+        "resource": "documents",
+        "status": "implemented",
+        "implemented": ["create", "get", "batchUpdate"],
+        "missing": [],
+        "tool_refs": [
+            "docs_create_document",
+            "docs_get_document",
+            "docs_insert_text",
+            "docs_replace_text",
+        ],
+    },
+    {
+        "api": "sheets",
+        "resource": "spreadsheets",
+        "status": "partially_implemented",
+        "implemented": ["create", "get"],
+        "missing": ["batchUpdate", "getByDataFilter"],
+        "tool_refs": ["sheets_create_spreadsheet", "sheets_get_spreadsheet"],
+    },
+    {
+        "api": "sheets",
+        "resource": "spreadsheets.values",
+        "status": "partially_implemented",
+        "implemented": ["batchGet", "get", "update"],
+        "missing": [
+            "append",
+            "batchClear",
+            "batchClearByDataFilter",
+            "batchGetByDataFilter",
+            "batchUpdate",
+            "batchUpdateByDataFilter",
+            "clear",
+        ],
+        "tool_refs": [
+            "sheets_get_values",
+            "sheets_batch_get_values",
+            "sheets_update_values",
+        ],
+    },
+    {
+        "api": "sheets",
+        "resource": "spreadsheets.developerMetadata/spreadsheets.sheets",
+        "status": "missing",
+        "implemented": [],
+        "missing": ["developerMetadata.get", "developerMetadata.search", "sheets.copyTo"],
+        "tool_refs": ["google_raw_request"],
+    },
+    {
+        "api": "slides",
+        "resource": "presentations",
+        "status": "implemented",
+        "implemented": ["batchUpdate", "create", "get"],
+        "missing": [],
+        "tool_refs": [
+            "slides_create_presentation",
+            "slides_get_presentation",
+            "slides_replace_text",
+        ],
+    },
+    {
+        "api": "slides",
+        "resource": "presentations.pages",
+        "status": "missing",
+        "implemented": [],
+        "missing": ["get", "getThumbnail"],
+        "tool_refs": ["google_raw_request"],
+    },
+    {
+        "api": "gmail",
+        "resource": "users.labels/users.messages/users.threads/users.drafts",
+        "status": "partially_implemented",
+        "implemented": [
+            "labels.create",
+            "labels.delete",
+            "labels.list",
+            "messages.delete",
+            "messages.get",
+            "messages.list",
+            "messages.modify",
+            "messages.send",
+            "messages.trash",
+            "messages.untrash",
+            "threads.get",
+            "threads.list",
+            "drafts.create",
+            "drafts.send",
+        ],
+        "missing": [
+            "labels.get",
+            "labels.patch",
+            "labels.update",
+            "messages.batchDelete",
+            "messages.batchModify",
+            "messages.import",
+            "messages.insert",
+            "messages.attachments.get",
+            "threads.delete",
+            "threads.modify",
+            "threads.trash",
+            "threads.untrash",
+            "drafts.delete",
+            "drafts.get",
+            "drafts.list",
+            "drafts.update",
+        ],
+        "tool_refs": [
+            "gmail_list_labels",
+            "gmail_create_label",
+            "gmail_delete_label",
+            "gmail_list_messages",
+            "gmail_search_messages",
+            "gmail_get_message",
+            "gmail_get_message_headers",
+            "gmail_get_message_body",
+            "gmail_batch_get_metadata",
+            "gmail_list_threads",
+            "gmail_get_thread",
+            "gmail_create_draft",
+            "gmail_send_draft",
+            "gmail_send_message",
+            "gmail_send_raw_message",
+            "gmail_modify_message_labels",
+            "gmail_trash_message",
+            "gmail_untrash_message",
+            "gmail_delete_message",
+        ],
+    },
+    {
+        "api": "gmail",
+        "resource": "users.history/users.settings/users.watch",
+        "status": "blocked_scope",
+        "implemented": [],
+        "missing": ["history.list", "settings.*", "users.getProfile", "users.stop", "users.watch"],
+        "tool_refs": ["mcp_health_check", "google_raw_request"],
+    },
+    {
+        "api": "calendar",
+        "resource": "calendars/calendarList/events",
+        "status": "partially_implemented",
+        "implemented": [
+            "calendars.delete",
+            "calendars.get",
+            "calendars.insert",
+            "calendarList.list",
+            "events.delete",
+            "events.get",
+            "events.insert",
+            "events.list",
+            "events.patch",
+            "events.quickAdd",
+        ],
+        "missing": [
+            "calendars.clear",
+            "calendars.patch",
+            "calendars.update",
+            "calendarList.delete",
+            "calendarList.get",
+            "calendarList.insert",
+            "calendarList.patch",
+            "calendarList.update",
+            "calendarList.watch",
+            "events.import",
+            "events.instances",
+            "events.move",
+            "events.update",
+            "events.watch",
+        ],
+        "tool_refs": [
+            "calendar_list_calendars",
+            "calendar_get_calendar",
+            "calendar_create_calendar",
+            "calendar_delete_calendar",
+            "calendar_list_events",
+            "calendar_search_events",
+            "calendar_batch_get_events",
+            "calendar_get_event",
+            "calendar_create_event",
+            "calendar_update_event",
+            "calendar_delete_event",
+            "calendar_quick_add",
+        ],
+    },
+    {
+        "api": "calendar",
+        "resource": "acl/channels/colors/freebusy/settings",
+        "status": "missing",
+        "implemented": [],
+        "missing": ["acl.*", "channels.stop", "colors.get", "freebusy.query", "settings.*"],
+        "tool_refs": ["google_raw_request"],
+    },
+]
+
+
+def _tool_registry() -> dict[str, Any]:
+    manager = getattr(mcp, "_tool_manager", None)
+    tools = getattr(manager, "_tools", None)
+    if isinstance(tools, dict):
+        return tools
+    tools = getattr(manager, "tools", None)
+    if isinstance(tools, dict):
+        return tools
+    return {}
+
+
+def _annotation_for_tool(tool_name: str) -> ToolAnnotations:
+    if tool_name in NAVIGATION_TOOLS:
+        return NAVIGATION_TOOL
+    if tool_name in READ_ONLY_TOOLS:
+        return READ_GOOGLE_TOOL
+    if tool_name in WRITE_TOOLS:
+        return WRITE_GOOGLE_TOOL
+    if tool_name in DESTRUCTIVE_TOOLS:
+        return DESTRUCTIVE_GOOGLE_TOOL
+    return WRITE_GOOGLE_TOOL
+
+
+def _parameter_description(tool_name: str, parameter_name: str) -> str:
+    if tool_name == "google_mcp_get_endpoint_coverage" and parameter_name == "status":
+        return "Coverage status filter: implemented, missing, intentionally_excluded, or blocked_scope."
+    if tool_name == "google_mcp_get_endpoint_coverage" and parameter_name == "resource":
+        return "Provider resource filter, for example files, users.messages, or events."
+    return COMMON_PARAMETER_DESCRIPTIONS.get(
+        parameter_name,
+        f"Argument for {tool_name}.",
+    )
+
+
+def _apply_tool_metadata() -> None:
+    for name, tool in _tool_registry().items():
+        tool.annotations = _annotation_for_tool(name)
+        description = TOOL_DESCRIPTIONS.get(name)
+        if description:
+            tool.description = description
+        properties = tool.parameters.get("properties", {})
+        for parameter_name, schema in properties.items():
+            if isinstance(schema, dict):
+                schema.setdefault("description", _parameter_description(name, parameter_name))
+                enum_values = PARAMETER_ENUMS.get(parameter_name)
+                if enum_values and "enum" not in schema:
+                    schema["enum"] = enum_values
 
 
 @mcp.tool()
@@ -2367,6 +3210,160 @@ async def calendar_quick_add(calendar_id: str, text: str) -> str:
 
 
 @mcp.tool()
+async def google_mcp_welcome() -> str:
+    """Show Google MCP navigation, setup requirements, and safe starting points."""
+
+    def _welcome():
+        return {
+            "service": "google-mcp",
+            "classification": "live_mcp",
+            "framework": "FastMCP",
+            "transport": "streamable_http",
+            "tool_count": registered_tool_count(),
+            "portal": {
+                "intended_access_path": "MAD MCP Portal",
+                "grant_header": MCP_PORTAL_GRANT_HEADER,
+                "grant_configured": bool(MCP_PORTAL_GRANT_TOKEN),
+            },
+            "required_headers": [
+                MCP_PORTAL_GRANT_HEADER,
+                MCP_GOOGLE_CLIENT_ID_HEADER,
+                MCP_GOOGLE_CLIENT_SECRET_HEADER,
+                MCP_GOOGLE_REFRESH_TOKEN_HEADER,
+            ],
+            "recommended_start": [
+                "google_mcp_list_capabilities",
+                "google_mcp_get_endpoint_coverage",
+                "mcp_health_check",
+            ],
+            "safety": {
+                "read_tools": sorted(READ_ONLY_TOOLS | NAVIGATION_TOOLS),
+                "write_tools": sorted(WRITE_TOOLS),
+                "destructive_tools": sorted(DESTRUCTIVE_TOOLS),
+                "send_tools_need_explicit_user_approval": [
+                    "gmail_send_message",
+                    "gmail_send_raw_message",
+                    "gmail_send_draft",
+                ],
+            },
+        }
+
+    return await run_tool("mcp", "welcome", _welcome, allow_retry=False)
+
+
+@mcp.tool()
+async def google_mcp_list_capabilities(category: str = "") -> str:
+    """List provider-native Google MCP categories and tool risk groups."""
+
+    def _list_capabilities():
+        category_filter = category.strip().lower()
+        groups = []
+        for group in CAPABILITY_GROUPS:
+            if category_filter and category_filter not in group["category"].lower():
+                continue
+            groups.append(
+                {
+                    "category": group["category"],
+                    "read": group["read"],
+                    "write": group["write"],
+                    "destructive": group["destructive"],
+                }
+            )
+        return {
+            "groups": groups,
+            "tool_count": registered_tool_count(),
+            "category_filter": category or None,
+            "raw_catalog_escape_hatch": "tools/list through MCP, or google_mcp_get_tool_usage for one tool.",
+        }
+
+    return await run_tool("mcp", "list_capabilities", _list_capabilities, allow_retry=False)
+
+
+@mcp.tool()
+async def google_mcp_get_endpoint_coverage(
+    api: str = "",
+    resource: str = "",
+    status: str = "",
+) -> str:
+    """Return the compact Google REST endpoint coverage matrix."""
+
+    def _coverage():
+        api_filter = api.strip().lower()
+        resource_filter = resource.strip().lower()
+        status_filter = status.strip().lower()
+        rows = []
+        for row in ENDPOINT_COVERAGE:
+            row_status = row["status"]
+            normalized_status = (
+                "missing" if row_status == "partially_implemented" else row_status
+            )
+            if api_filter and api_filter != row["api"]:
+                continue
+            if resource_filter and resource_filter not in row["resource"].lower():
+                continue
+            if status_filter and status_filter not in {row_status, normalized_status}:
+                continue
+            rows.append(row)
+        return {
+            "source": "Official Google REST discovery documents; see docs/endpoint-coverage.md.",
+            "retrieved": "2026-04-29",
+            "filters": {
+                "api": api or None,
+                "resource": resource or None,
+                "status": status or None,
+            },
+            "rows": rows,
+        }
+
+    return await run_tool("mcp", "get_endpoint_coverage", _coverage, allow_retry=False)
+
+
+@mcp.tool()
+async def google_mcp_get_tool_usage(tool_name: str = "") -> str:
+    """Describe usage, side effects, and related tools for one Google MCP tool."""
+
+    def _usage():
+        name = tool_name.strip()
+        if not name:
+            return {
+                "message": "Provide tool_name for detailed usage.",
+                "available_tools": sorted(_tool_registry().keys()),
+            }
+        if name not in _tool_registry():
+            raise ValueError(f"Unknown tool_name: {name}")
+
+        group_matches = [
+            group["category"]
+            for group in CAPABILITY_GROUPS
+            if name in group["read"] or name in group["write"] or name in group["destructive"]
+        ]
+        if name in READ_ONLY_TOOLS or name in NAVIGATION_TOOLS:
+            risk = "read"
+        elif name in DESTRUCTIVE_TOOLS:
+            risk = "destructive"
+        else:
+            risk = "write"
+
+        return {
+            "tool_name": name,
+            "description": TOOL_DESCRIPTIONS.get(name, ""),
+            "risk": risk,
+            "annotations": _annotation_for_tool(name).model_dump(exclude_none=True),
+            "categories": group_matches,
+            "parameters": _tool_registry()[name].parameters.get("properties", {}),
+            "related_tools": [
+                tool
+                for group in CAPABILITY_GROUPS
+                if group["category"] in group_matches
+                for tool in group["read"] + group["write"] + group["destructive"]
+                if tool != name
+            ],
+        }
+
+    return await run_tool("mcp", "get_tool_usage", _usage, allow_retry=False)
+
+
+@mcp.tool()
 async def mcp_health_check(
     run_checks: bool = True,
     warm_all: bool = False,
@@ -2565,6 +3562,9 @@ async def mcp_health_check(
     return await run_tool("mcp", "health_check", _health_check, allow_retry=False)
 
 
+_apply_tool_metadata()
+
+
 def _extract_header_from_scope(scope: dict[str, Any], name: str) -> str:
     target = name.lower().encode("utf-8")
     for key, value in scope.get("headers", []):
@@ -2592,6 +3592,54 @@ def _extract_jsonrpc_id(payload: dict[str, Any] | None) -> str | int:
     if isinstance(candidate, (str, int)):
         return candidate
     return "server-error"
+
+
+def _validate_portal_grant(headers: dict[str, str]) -> None:
+    if not MCP_PORTAL_GRANT_TOKEN:
+        raise ValueError("Server is missing required portal grant configuration.")
+    supplied = headers.get(MCP_PORTAL_GRANT_HEADER, "")
+    if not supplied:
+        raise ValueError(f"Missing required header: {MCP_PORTAL_GRANT_HEADER}.")
+    if not hmac.compare_digest(supplied, MCP_PORTAL_GRANT_TOKEN):
+        raise ValueError("Invalid portal grant token.")
+
+
+def _camel_to_snake(value: str) -> str:
+    first_pass = re.sub("(.)([A-Z][a-z]+)", r"\1_\2", value)
+    return re.sub("([a-z0-9])([A-Z])", r"\1_\2", first_pass).lower()
+
+
+def _normalize_tool_arguments(payload: dict[str, Any]) -> dict[str, Any]:
+    if payload.get("method") != "tools/call":
+        return payload
+    params = payload.get("params")
+    if not isinstance(params, dict):
+        return payload
+    tool_name = params.get("name")
+    if not isinstance(tool_name, str):
+        return payload
+    if "." in tool_name:
+        tool_name = tool_name.rsplit(".", 1)[-1]
+    tool = _tool_registry().get(tool_name)
+    if tool is None:
+        return payload
+    arguments = params.get("arguments")
+    if not isinstance(arguments, dict):
+        return payload
+    allowed = set(tool.parameters.get("properties", {}).keys())
+    normalized: dict[str, Any] = {}
+    changed = False
+    for key, value in arguments.items():
+        target_key = key
+        if key not in allowed:
+            snake_key = _camel_to_snake(key)
+            if snake_key in allowed and snake_key not in arguments:
+                target_key = snake_key
+                changed = True
+        normalized[target_key] = value
+    if changed:
+        params["arguments"] = normalized
+    return payload
 
 
 async def _read_request_body(receive) -> bytes:
@@ -2703,6 +3751,14 @@ def build_hosted_mcp_http_wrapper(app):
                     "version": os.getenv("MCP_SERVER_VERSION", "dev"),
                     "tool_count": tool_count,
                     "tools": {"total": tool_count},
+                    "configuration": {
+                        "portal_grant_configured": bool(MCP_PORTAL_GRANT_TOKEN),
+                        "byok_headers_required": {
+                            MCP_GOOGLE_CLIENT_ID_HEADER: MCP_REQUIRE_REQUEST_GOOGLE_CLIENT_ID,
+                            MCP_GOOGLE_CLIENT_SECRET_HEADER: MCP_REQUIRE_REQUEST_GOOGLE_CLIENT_SECRET,
+                            MCP_GOOGLE_REFRESH_TOKEN_HEADER: MCP_REQUIRE_REQUEST_GOOGLE_REFRESH_TOKEN,
+                        },
+                    },
                 },
                 extra_headers=[(b"cache-control", b"no-store")],
             )
@@ -2729,6 +3785,12 @@ def build_hosted_mcp_http_wrapper(app):
                 )
                 return
             jsonrpc_id = _extract_jsonrpc_id(payload)
+            normalized_payload = _normalize_tool_arguments(payload)
+            if normalized_payload is not payload or normalized_payload != payload:
+                payload = normalized_payload
+            body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
 
         if method == "POST":
             content_type = _extract_header_from_scope(scope, "content-type").lower()
@@ -2764,6 +3826,20 @@ def build_hosted_mcp_http_wrapper(app):
                 )
                 return
 
+        normalized_headers = _normalize_header_map(scope.get("headers", []) or [])
+        try:
+            _validate_portal_grant(normalized_headers)
+        except ValueError as exc:
+            await _send_jsonrpc_error(
+                send,
+                status=401,
+                code=-32001,
+                message=str(exc),
+                request_id=jsonrpc_id,
+                data={"required_headers": [MCP_PORTAL_GRANT_HEADER]},
+            )
+            return
+
         try:
             request_client, _ = _resolve_request_client(scope.get("headers", []) or [])
         except ValueError as exc:
@@ -2775,6 +3851,7 @@ def build_hosted_mcp_http_wrapper(app):
                 request_id=jsonrpc_id,
                 data={
                     "required_headers": [
+                        MCP_PORTAL_GRANT_HEADER,
                         MCP_GOOGLE_CLIENT_ID_HEADER,
                         MCP_GOOGLE_CLIENT_SECRET_HEADER,
                         MCP_GOOGLE_REFRESH_TOKEN_HEADER,

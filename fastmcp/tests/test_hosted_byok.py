@@ -1,11 +1,14 @@
 import asyncio
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 from starlette.testclient import TestClient
+
+os.environ.setdefault("MCP_PORTAL_GRANT_TOKEN", "test-portal-grant")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -34,6 +37,7 @@ def _mcp_headers(**overrides: str) -> dict[str, str]:
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
+        "X-MADPANDA-PORTAL-GRANT": "test-portal-grant",
         "X-Google-Client-Id": "cid",
         "X-Google-Client-Secret": "csecret",
         "X-Google-Refresh-Token": "rtok",
@@ -56,12 +60,45 @@ def _mcp_client():
     return TestClient(app)
 
 
+def test_missing_portal_grant_is_rejected_before_byok():
+    app = _minimal_ok_app()
+    headers = _mcp_headers()
+    headers.pop("X-MADPANDA-PORTAL-GRANT")
+    status_code, payload = _post_json(
+        app,
+        "/mcp",
+        headers=headers,
+        payload={"jsonrpc": "2.0", "id": 11, "method": "tools/list", "params": {}},
+    )
+    assert status_code == 401
+    assert payload["error"]["code"] == -32001
+    assert "x-madpanda-portal-grant" in payload["error"]["message"]
+    assert "x-google-client-id" not in payload["error"]["message"]
+
+
+def test_invalid_portal_grant_is_rejected():
+    app = _minimal_ok_app()
+    status_code, payload = _post_json(
+        app,
+        "/mcp",
+        headers=_mcp_headers(**{"X-MADPANDA-PORTAL-GRANT": "wrong"}),
+        payload={"jsonrpc": "2.0", "id": 12, "method": "tools/list", "params": {}},
+    )
+    assert status_code == 401
+    assert payload["error"]["code"] == -32001
+    assert payload["error"]["message"] == "Invalid portal grant token."
+
+
 def test_missing_byok_headers_are_rejected():
     app = _minimal_ok_app()
     status_code, payload = _post_json(
         app,
         "/mcp",
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-MADPANDA-PORTAL-GRANT": "test-portal-grant",
+        },
         payload={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
     )
     assert status_code == 401
@@ -103,6 +140,57 @@ def test_tools_list_succeeds_with_valid_byok_headers():
     assert "result" in payload
     assert "tools" in payload["result"]
     assert any(tool["name"] == "mcp_health_check" for tool in payload["result"]["tools"])
+
+
+def test_all_tools_have_openai_annotations_and_parameter_descriptions():
+    tools = gm._tool_registry()
+    assert len(tools) == gm.EXPECTED_TOOL_COUNT
+    for tool in tools.values():
+        assert tool.annotations is not None
+        dumped = tool.annotations.model_dump()
+        assert dumped["readOnlyHint"] is not None
+        assert dumped["destructiveHint"] is not None
+        assert dumped["openWorldHint"] is not None
+        for schema in tool.parameters.get("properties", {}).values():
+            assert "description" in schema
+
+
+def test_common_camel_case_tool_arguments_are_normalized():
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 13,
+        "method": "tools/call",
+        "params": {
+            "name": "calendar_list_events",
+            "arguments": {
+                "calendarId": "primary",
+                "timeMin": "2026-04-15T00:00:00Z",
+                "timeMax": "2026-04-16T00:00:00Z",
+            },
+        },
+    }
+    gm._normalize_tool_arguments(payload)
+    args = payload["params"]["arguments"]
+    assert args["calendar_id"] == "primary"
+    assert args["time_min"] == "2026-04-15T00:00:00Z"
+    assert args["time_max"] == "2026-04-16T00:00:00Z"
+    assert "timeMin" not in args
+
+
+def test_gmail_batch_metadata_camel_case_alias_is_normalized():
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 14,
+        "method": "tools/call",
+        "params": {
+            "name": "gmail_batch_get_metadata",
+            "arguments": {"messageIds": ["m1", "m2"], "metadataHeaders": ["Subject"]},
+        },
+    }
+    gm._normalize_tool_arguments(payload)
+    args = payload["params"]["arguments"]
+    assert args["message_ids"] == ["m1", "m2"]
+    assert args["metadata_headers"] == ["Subject"]
 
 
 def test_health_check_succeeds_with_valid_byok_headers():
@@ -187,6 +275,7 @@ def test_concurrent_requests_keep_client_context_isolated(monkeypatch):
         headers = [
             (b"content-type", b"application/json"),
             (b"accept", b"application/json"),
+            (b"x-madpanda-portal-grant", b"test-portal-grant"),
             (b"x-google-client-id", client_id.encode("utf-8")),
             (b"x-google-client-secret", b"secret"),
             (b"x-google-refresh-token", b"refresh"),

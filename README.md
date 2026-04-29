@@ -31,6 +31,8 @@ Required request headers for hosted mode:
   - `Content-Type: application/json` (POST)
   - `Accept: application/json` (POST)
   - `Accept: text/event-stream` (GET stream)
+- MAD MCP Portal access gate:
+  - `X-MADPANDA-PORTAL-GRANT`
 - BYOK credential headers (required on every `/mcp` request):
   - `X-Google-Client-Id`
   - `X-Google-Client-Secret`
@@ -84,6 +86,8 @@ Edit `fastmcp/.env` if you want to override defaults:
 ```
 MCP_HTTP_PORT=8086
 MCP_BIND_ADDRESS=0.0.0.0
+MCP_PORTAL_GRANT_TOKEN=...
+MCP_PORTAL_GRANT_HEADER=x-madpanda-portal-grant
 GOOGLE_CREDENTIALS_PATH=fastmcp/.google/credentials.json
 GOOGLE_TOKEN_PATH=fastmcp/.google/token.json
 GOOGLE_SCOPES=... (same as above)
@@ -121,8 +125,8 @@ docker compose -f fastmcp/docker-compose.yaml up --build
 ## Connect to n8n
 
 If n8n runs in Docker on the same host, make sure the Google MCP container is
-on the `npm_default` network. The provided `fastmcp/docker-compose.yaml` already
-attaches it there.
+on `mcp-network`. The provided `fastmcp/docker-compose.yaml` attaches the
+container to that external network and uses `restart: unless-stopped`.
 
 In n8n:
 
@@ -131,6 +135,7 @@ In n8n:
 3. Set server transport to `HTTP streamable`.
 4. Set auth type to `Multiple Headers Auth`.
 5. Add:
+   - `X-MADPANDA-PORTAL-GRANT`
    - `X-Google-Client-Id`
    - `X-Google-Client-Secret`
    - `X-Google-Refresh-Token`
@@ -153,6 +158,10 @@ Then create the virtual environment as shown above.
 
 ## Tools (curated)
 
+- `google_mcp_welcome`
+- `google_mcp_list_capabilities`
+- `google_mcp_get_endpoint_coverage`
+- `google_mcp_get_tool_usage`
 - `drive_list_files`
 - `drive_search_files`
 - `drive_batch_get_metadata`
@@ -208,6 +217,13 @@ Then create the virtual environment as shown above.
 - `calendar_quick_add`
 - `google_raw_request` (advanced/debug passthrough; see below)
 - `mcp_health_check`
+
+## Agent navigation
+
+Start with `google_mcp_welcome`, then use `google_mcp_list_capabilities` for
+provider-native categories, `google_mcp_get_tool_usage` for one tool, and
+`google_mcp_get_endpoint_coverage` for the Google REST parity matrix. These
+tools keep discovery compact so agents do not need to dump the full raw catalog.
 
 ## Pagination
 

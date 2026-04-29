@@ -1,6 +1,5 @@
 import argparse
 import os
-import sys
 
 from google_auth_oauthlib.flow import InstalledAppFlow
 

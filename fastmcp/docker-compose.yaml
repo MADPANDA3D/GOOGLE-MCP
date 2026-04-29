@@ -2,6 +2,7 @@ services:
   google-mcp:
     build: .
     container_name: google-mcp
+    restart: unless-stopped
     env_file:
       - .env
     volumes:
