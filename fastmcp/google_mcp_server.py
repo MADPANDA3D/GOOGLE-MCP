@@ -13,9 +13,10 @@ import threading
 import time
 import urllib.parse
 import uuid
-from collections import OrderedDict
+from collections import Counter, OrderedDict, defaultdict
 from dataclasses import dataclass
 from email.message import EmailMessage
+from email.utils import parseaddr
 from typing import Any, Callable
 
 from google.auth.transport.requests import AuthorizedSession, Request
@@ -38,6 +39,12 @@ DEFAULT_SCOPES = (
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/youtube.readonly",
+    "https://www.googleapis.com/auth/analytics.readonly",
+    "https://www.googleapis.com/auth/webmasters.readonly",
+    "https://www.googleapis.com/auth/business.manage",
+    "https://www.googleapis.com/auth/content",
+    "https://www.googleapis.com/auth/adsense.readonly",
 )
 DEFAULT_DRIVE_FIELDS = "files(id,name,mimeType,modifiedTime,size),nextPageToken"
 DEFAULT_DRIVE_GET_FIELDS = "id,name,mimeType,modifiedTime,size,parents"
@@ -112,16 +119,20 @@ MCP_GOOGLE_CLIENT_SECRET_HEADER = os.getenv(
 MCP_GOOGLE_REFRESH_TOKEN_HEADER = os.getenv(
     "MCP_GOOGLE_REFRESH_TOKEN_HEADER", "x-google-refresh-token"
 ).strip().lower()
+MCP_GOOGLE_MAPS_API_KEY_HEADER = os.getenv(
+    "MCP_GOOGLE_MAPS_API_KEY_HEADER", "x-google-maps-api-key"
+).strip().lower()
 MCP_PORTAL_GRANT_HEADER = os.getenv(
     "MCP_PORTAL_GRANT_HEADER", "x-madpanda-portal-grant"
 ).strip().lower()
 MCP_PORTAL_GRANT_TOKEN = os.getenv("MCP_PORTAL_GRANT_TOKEN", "")
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
 MCP_BYOK_CLIENT_CACHE_SIZE = max(int(os.getenv("MCP_BYOK_CLIENT_CACHE_SIZE", "256")), 0)
 MCP_BYOK_CLIENT_CACHE_TTL_SECONDS = max(
     float(os.getenv("MCP_BYOK_CLIENT_CACHE_TTL_SECONDS", "900")),
     0.0,
 )
-EXPECTED_TOOL_COUNT = 59
+EXPECTED_TOOL_COUNT = 145
 
 SERVER_START_TIME = time.time()
 SERVER_START_MONO = time.monotonic()
@@ -451,6 +462,9 @@ BYOK_CLIENT_CACHE = ByokClientCache(
 ACTIVE_GOOGLE_CLIENT: contextvars.ContextVar[GoogleWorkspaceClient | None] = (
     contextvars.ContextVar("active_google_client", default=None)
 )
+ACTIVE_REQUEST_HEADERS: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
+    "active_request_headers", default={}
+)
 client = ActiveClientProxy(DEFAULT_CLIENT)
 
 
@@ -502,6 +516,24 @@ def _validate_raw_request_url(url: str) -> str:
         "calendar.googleapis.com",
         "oauth2.googleapis.com",
         "people.googleapis.com",
+        "youtube.googleapis.com",
+        "analyticsdata.googleapis.com",
+        "searchconsole.googleapis.com",
+        "mybusiness.googleapis.com",
+        "mybusinessaccountmanagement.googleapis.com",
+        "mybusinessbusinessinformation.googleapis.com",
+        "mybusinessnotifications.googleapis.com",
+        "mybusinessplaceactions.googleapis.com",
+        "mybusinessqanda.googleapis.com",
+        "mybusinessverifications.googleapis.com",
+        "businessprofileperformance.googleapis.com",
+        "shoppingcontent.googleapis.com",
+        "merchantapi.googleapis.com",
+        "adsense.googleapis.com",
+        "geocode.googleapis.com",
+        "places.googleapis.com",
+        "routes.googleapis.com",
+        "maps.googleapis.com",
     }
     if cleaned.startswith("http://") or cleaned.startswith("https://"):
         parsed = urllib.parse.urlparse(cleaned)
@@ -813,6 +845,181 @@ def _extract_gmail_bodies(payload: dict[str, Any] | None) -> dict[str, str]:
 
     _walk(payload)
     return results
+
+
+def _header_map(headers: list[dict[str, str]]) -> dict[str, str]:
+    return {
+        str(entry.get("name", "")).lower(): str(entry.get("value", ""))
+        for entry in headers or []
+        if entry.get("name")
+    }
+
+
+def _gmail_sender_key(headers: dict[str, str]) -> dict[str, str]:
+    from_header = headers.get("from", "")
+    sender_name, sender_email = parseaddr(from_header)
+    sender_email = sender_email.lower()
+    domain = sender_email.split("@", 1)[1] if "@" in sender_email else ""
+    list_id = headers.get("list-id", "").strip()
+    key = list_id.lower() or domain or sender_email or "unknown"
+    return {
+        "key": key,
+        "sender_name": sender_name,
+        "sender_email": sender_email,
+        "domain": domain,
+        "list_id": list_id,
+    }
+
+
+def _clamp_int(value: int, *, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = minimum
+    return max(minimum, min(parsed, maximum))
+
+
+def _chunked(items: list[Any], size: int) -> list[list[Any]]:
+    size = max(1, size)
+    return [items[index : index + size] for index in range(0, len(items), size)]
+
+
+def _gmail_list_message_ids(
+    service,
+    *,
+    query: str,
+    label_ids: list[str] | None = None,
+    include_spam_trash: bool = False,
+    max_messages: int = 500,
+    page_size: int = 500,
+    page_token: str = "",
+) -> tuple[list[dict[str, Any]], str, int | None, int]:
+    remaining = _clamp_int(max_messages, minimum=1, maximum=5000)
+    page_size = _clamp_int(page_size, minimum=1, maximum=500)
+    next_token = page_token or ""
+    messages: list[dict[str, Any]] = []
+    estimate: int | None = None
+    pages = 0
+    while remaining > 0:
+        request = service.users().messages().list(
+            userId="me",
+            q=query or None,
+            labelIds=label_ids or None,
+            includeSpamTrash=include_spam_trash,
+            maxResults=min(page_size, remaining),
+            pageToken=next_token or None,
+        )
+        data = request.execute()
+        pages += 1
+        if estimate is None and data.get("resultSizeEstimate") is not None:
+            try:
+                estimate = int(data.get("resultSizeEstimate"))
+            except (TypeError, ValueError):
+                estimate = None
+        batch = data.get("messages", []) or []
+        messages.extend(batch)
+        remaining -= len(batch)
+        next_token = data.get("nextPageToken", "") or ""
+        if not next_token or not batch:
+            break
+    return messages, next_token, estimate, pages
+
+
+def _gmail_get_metadata_batch(
+    service,
+    message_ids: list[str],
+    metadata_headers: list[str] | None = None,
+    *,
+    max_messages: int = 500,
+) -> list[dict[str, Any]]:
+    headers = metadata_headers or [
+        "From",
+        "To",
+        "Subject",
+        "Date",
+        "List-ID",
+        "List-Unsubscribe",
+    ]
+    results: list[dict[str, Any]] = []
+    for message_id in message_ids[: _clamp_int(max_messages, minimum=1, maximum=5000)]:
+        if not message_id:
+            continue
+        data = (
+            service.users()
+            .messages()
+            .get(
+                userId="me",
+                id=message_id,
+                format="metadata",
+                metadataHeaders=headers,
+            )
+            .execute()
+        )
+        header_map = _header_map(data.get("payload", {}).get("headers", []) or [])
+        results.append(
+            {
+                "id": data.get("id"),
+                "threadId": data.get("threadId"),
+                "labelIds": data.get("labelIds", []) or [],
+                "snippet": data.get("snippet", ""),
+                "internalDate": data.get("internalDate"),
+                "headers": header_map,
+            }
+        )
+    return results
+
+
+def _require_maps_api_key() -> str:
+    headers = ACTIVE_REQUEST_HEADERS.get() or {}
+    api_key = headers.get(MCP_GOOGLE_MAPS_API_KEY_HEADER, "") or GOOGLE_MAPS_API_KEY
+    if not api_key:
+        raise ValueError(
+            f"Missing Google Maps API key. Provide {MCP_GOOGLE_MAPS_API_KEY_HEADER} through the portal or GOOGLE_MAPS_API_KEY in the service environment."
+        )
+    return api_key
+
+
+def _maps_request(
+    method: str,
+    url: str,
+    *,
+    params: dict[str, Any] | None = None,
+    json_body: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    session, _ = client.get_session()
+    request_headers = dict(headers or {})
+    request_headers.setdefault("X-Goog-Api-Key", _require_maps_api_key())
+    response = session.request(method.upper(), url, params=params, json=json_body, headers=request_headers)
+    payload: dict[str, Any] = {"status": response.status_code}
+    content_type = response.headers.get("content-type", "")
+    if "application/json" in content_type:
+        payload["json"] = response.json()
+    else:
+        payload["text"] = response.text[:20000]
+    if not response.ok:
+        raise RuntimeError(f"Maps request failed with status {response.status_code}: {payload}")
+    return payload
+
+
+def _google_json_request(
+    method: str,
+    url: str,
+    *,
+    params: dict[str, Any] | None = None,
+    json_body: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    session, _ = client.get_session()
+    response = session.request(method.upper(), url, params=params, json=json_body)
+    payload: dict[str, Any] = {"status": response.status_code}
+    content_type = response.headers.get("content-type", "")
+    if "application/json" in content_type:
+        payload["json"] = response.json()
+    else:
+        payload["text"] = response.text[:20000]
+    if not response.ok:
+        raise RuntimeError(f"Google API request failed with status {response.status_code}: {payload}")
+    return payload
 
 
 async def run_blocking(func, *args, **kwargs):
@@ -2065,6 +2272,260 @@ async def drive_purge_trash(confirm: bool = False) -> str:
 
 
 @mcp.tool()
+async def drive_about_get(fields: str = "user,storageQuota,importFormats,exportFormats") -> str:
+    """Get Drive about/user/storage metadata."""
+
+    def _about_get():
+        service, cached = client.get_service("drive", "v3")
+        return service.about().get(fields=fields).execute(), {"cached_service": cached}
+
+    return await run_tool("drive", "about_get", _about_get, allow_retry=True)
+
+
+@mcp.tool()
+async def drive_list_permissions(file_id: str, fields: str = "permissions(id,type,role,emailAddress,domain),nextPageToken") -> str:
+    """List Drive file permissions."""
+
+    def _list_permissions():
+        if not file_id:
+            raise ValueError("file_id cannot be empty")
+        service, cached = client.get_service("drive", "v3")
+        request = service.permissions().list(fileId=file_id, fields=fields)
+        data = request.execute()
+        return _attach_page_meta(data, cached)
+
+    return await run_tool("drive", "list_permissions", _list_permissions, allow_retry=True)
+
+
+@mcp.tool()
+async def drive_get_permission(file_id: str, permission_id: str, fields: str = "") -> str:
+    """Get one Drive permission."""
+
+    def _get_permission():
+        if not file_id or not permission_id:
+            raise ValueError("file_id and permission_id are required")
+        service, cached = client.get_service("drive", "v3")
+        request = service.permissions().get(
+            fileId=file_id,
+            permissionId=permission_id,
+            fields=fields or None,
+        )
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("drive", "get_permission", _get_permission, allow_retry=True)
+
+
+@mcp.tool()
+async def drive_create_permission(
+    file_id: str,
+    permission_body: dict[str, Any],
+    send_notification_email: bool = False,
+    confirm: bool = False,
+) -> str:
+    """Create a Drive sharing permission."""
+
+    def _create_permission():
+        if not file_id:
+            raise ValueError("file_id cannot be empty")
+        if not permission_body:
+            raise ValueError("permission_body cannot be empty")
+        _require_confirm("create a Drive sharing permission", confirm)
+        service, cached = client.get_service("drive", "v3")
+        request = service.permissions().create(
+            fileId=file_id,
+            body=permission_body,
+            sendNotificationEmail=send_notification_email,
+            fields="id,type,role,emailAddress,domain",
+        )
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("drive", "create_permission", _create_permission, allow_retry=False)
+
+
+@mcp.tool()
+async def drive_update_permission(
+    file_id: str,
+    permission_id: str,
+    permission_body: dict[str, Any],
+    confirm: bool = False,
+) -> str:
+    """Patch a Drive sharing permission."""
+
+    def _update_permission():
+        if not file_id or not permission_id:
+            raise ValueError("file_id and permission_id are required")
+        if not permission_body:
+            raise ValueError("permission_body cannot be empty")
+        _require_confirm("update a Drive sharing permission", confirm)
+        service, cached = client.get_service("drive", "v3")
+        request = service.permissions().update(
+            fileId=file_id,
+            permissionId=permission_id,
+            body=permission_body,
+            fields="id,type,role,emailAddress,domain",
+        )
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("drive", "update_permission", _update_permission, allow_retry=False)
+
+
+@mcp.tool()
+async def drive_delete_permission(file_id: str, permission_id: str, confirm: bool = False) -> str:
+    """Delete a Drive sharing permission."""
+
+    def _delete_permission():
+        if not file_id or not permission_id:
+            raise ValueError("file_id and permission_id are required")
+        _require_confirm("delete a Drive sharing permission", confirm)
+        service, cached = client.get_service("drive", "v3")
+        service.permissions().delete(fileId=file_id, permissionId=permission_id).execute()
+        return {"file_id": file_id, "permission_id": permission_id, "deleted": True}, {"cached_service": cached}
+
+    return await run_tool("drive", "delete_permission", _delete_permission, allow_retry=False)
+
+
+@mcp.tool()
+async def drive_list_comments(file_id: str, fields: str = "comments(id,content,author,createdTime,modifiedTime,resolved),nextPageToken") -> str:
+    """List Drive file comments."""
+
+    def _list_comments():
+        if not file_id:
+            raise ValueError("file_id cannot be empty")
+        service, cached = client.get_service("drive", "v3")
+        data = service.comments().list(fileId=file_id, fields=fields).execute()
+        return _attach_page_meta(data, cached)
+
+    return await run_tool("drive", "list_comments", _list_comments, allow_retry=True)
+
+
+@mcp.tool()
+async def drive_create_comment(file_id: str, content: str, confirm: bool = False) -> str:
+    """Create a Drive file comment."""
+
+    def _create_comment():
+        if not file_id:
+            raise ValueError("file_id cannot be empty")
+        if not content:
+            raise ValueError("content cannot be empty")
+        _ensure_confirmed("create a Drive comment", confirm)
+        service, cached = client.get_service("drive", "v3")
+        request = service.comments().create(fileId=file_id, body={"content": content}, fields="id,content")
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("drive", "create_comment", _create_comment, allow_retry=False)
+
+
+@mcp.tool()
+async def drive_update_comment(file_id: str, comment_id: str, content: str, confirm: bool = False) -> str:
+    """Update a Drive file comment."""
+
+    def _update_comment():
+        if not file_id or not comment_id:
+            raise ValueError("file_id and comment_id are required")
+        if not content:
+            raise ValueError("content cannot be empty")
+        _ensure_confirmed("update a Drive comment", confirm)
+        service, cached = client.get_service("drive", "v3")
+        request = service.comments().update(
+            fileId=file_id,
+            commentId=comment_id,
+            body={"content": content},
+            fields="id,content",
+        )
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("drive", "update_comment", _update_comment, allow_retry=False)
+
+
+@mcp.tool()
+async def drive_delete_comment(file_id: str, comment_id: str, confirm: bool = False) -> str:
+    """Delete a Drive file comment."""
+
+    def _delete_comment():
+        if not file_id or not comment_id:
+            raise ValueError("file_id and comment_id are required")
+        _require_confirm("delete a Drive comment", confirm)
+        service, cached = client.get_service("drive", "v3")
+        service.comments().delete(fileId=file_id, commentId=comment_id).execute()
+        return {"file_id": file_id, "comment_id": comment_id, "deleted": True}, {"cached_service": cached}
+
+    return await run_tool("drive", "delete_comment", _delete_comment, allow_retry=False)
+
+
+@mcp.tool()
+async def drive_list_revisions(file_id: str, fields: str = "revisions(id,mimeType,modifiedTime,keepForever),nextPageToken") -> str:
+    """List Drive file revisions."""
+
+    def _list_revisions():
+        if not file_id:
+            raise ValueError("file_id cannot be empty")
+        service, cached = client.get_service("drive", "v3")
+        data = service.revisions().list(fileId=file_id, fields=fields).execute()
+        return _attach_page_meta(data, cached)
+
+    return await run_tool("drive", "list_revisions", _list_revisions, allow_retry=True)
+
+
+@mcp.tool()
+async def drive_list_shared_drives(page_size: int = 100, page_token: str = "") -> str:
+    """List shared drives."""
+
+    def _list_shared_drives():
+        service, cached = client.get_service("drive", "v3")
+        data = service.drives().list(
+            pageSize=_clamp_int(page_size, minimum=1, maximum=100),
+            pageToken=page_token or None,
+        ).execute()
+        return _attach_page_meta(data, cached)
+
+    return await run_tool("drive", "list_shared_drives", _list_shared_drives, allow_retry=True)
+
+
+@mcp.tool()
+async def drive_copy_file(
+    file_id: str,
+    name: str = "",
+    parent_id: str = "",
+    allow_any_parent: bool = False,
+    confirm: bool = False,
+) -> str:
+    """Copy a Drive file."""
+
+    def _copy_file():
+        if not file_id:
+            raise ValueError("file_id cannot be empty")
+        _ensure_confirmed("copy a Drive file", confirm)
+        service, cached = client.get_service("drive", "v3")
+        body: dict[str, Any] = {}
+        if name:
+            body["name"] = name
+        effective_parent_id = _enforce_drive_allowlist(parent_id, allow_any_parent)
+        if effective_parent_id:
+            body["parents"] = [effective_parent_id]
+        request = service.files().copy(fileId=file_id, body=body, fields=DEFAULT_DRIVE_GET_FIELDS)
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("drive", "copy_file", _copy_file, allow_retry=False)
+
+
+@mcp.tool()
+async def drive_update_file_metadata(file_id: str, metadata: dict[str, Any], confirm: bool = False) -> str:
+    """Patch Drive file metadata."""
+
+    def _update_file_metadata():
+        if not file_id:
+            raise ValueError("file_id cannot be empty")
+        if not metadata:
+            raise ValueError("metadata cannot be empty")
+        _ensure_confirmed("update Drive file metadata", confirm)
+        service, cached = client.get_service("drive", "v3")
+        request = service.files().update(fileId=file_id, body=metadata, fields=DEFAULT_DRIVE_GET_FIELDS)
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("drive", "update_file_metadata", _update_file_metadata, allow_retry=False)
+
+
+@mcp.tool()
 async def docs_create_document(title: str) -> str:
     """Create a Google Doc."""
 
@@ -2152,6 +2613,30 @@ async def docs_replace_text(
         return request.execute(), {"cached_service": cached}
 
     return await run_tool("docs", "replace_text", _replace, allow_retry=False)
+
+
+@mcp.tool()
+async def docs_batch_update(
+    document_id: str,
+    requests: list[dict[str, Any]],
+    confirm: bool = False,
+) -> str:
+    """Run a controlled Google Docs batchUpdate request."""
+
+    def _batch_update():
+        if not document_id:
+            raise ValueError("document_id cannot be empty")
+        if not requests:
+            raise ValueError("requests cannot be empty")
+        _ensure_confirmed("run Docs batchUpdate", confirm)
+        service, cached = client.get_service("docs", "v1")
+        request = service.documents().batchUpdate(
+            documentId=document_id,
+            body={"requests": requests},
+        )
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("docs", "batch_update", _batch_update, allow_retry=False)
 
 
 @mcp.tool()
@@ -2280,6 +2765,155 @@ async def sheets_update_values(
 
 
 @mcp.tool()
+async def sheets_append_values(
+    spreadsheet_id: str,
+    range_a1: str,
+    values: Values,
+    value_input_option: str = "RAW",
+    insert_data_option: str = "INSERT_ROWS",
+) -> str:
+    """Append rows to a Google Sheet range."""
+
+    def _append_values():
+        if not spreadsheet_id or not range_a1:
+            raise ValueError("spreadsheet_id and range_a1 are required")
+        if values is None:
+            raise ValueError("values cannot be empty")
+        service, cached = client.get_service("sheets", "v4")
+        request = service.spreadsheets().values().append(
+            spreadsheetId=spreadsheet_id,
+            range=range_a1,
+            valueInputOption=value_input_option,
+            insertDataOption=insert_data_option,
+            body={"values": values},
+        )
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("sheets", "append_values", _append_values, allow_retry=False)
+
+
+@mcp.tool()
+async def sheets_clear_values(
+    spreadsheet_id: str,
+    range_a1: str,
+    confirm: bool = False,
+) -> str:
+    """Clear values from a Google Sheet range."""
+
+    def _clear_values():
+        if not spreadsheet_id or not range_a1:
+            raise ValueError("spreadsheet_id and range_a1 are required")
+        _require_confirm("clear Google Sheets values", confirm)
+        service, cached = client.get_service("sheets", "v4")
+        request = service.spreadsheets().values().clear(
+            spreadsheetId=spreadsheet_id,
+            range=range_a1,
+            body={},
+        )
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("sheets", "clear_values", _clear_values, allow_retry=False)
+
+
+@mcp.tool()
+async def sheets_batch_update_values(
+    spreadsheet_id: str,
+    data: list[dict[str, Any]],
+    value_input_option: str = "RAW",
+    confirm: bool = False,
+) -> str:
+    """Write multiple Google Sheets ranges in one values batchUpdate."""
+
+    def _batch_update_values():
+        if not spreadsheet_id:
+            raise ValueError("spreadsheet_id cannot be empty")
+        if not data:
+            raise ValueError("data cannot be empty")
+        _ensure_confirmed("batch update Google Sheets values", confirm)
+        service, cached = client.get_service("sheets", "v4")
+        request = service.spreadsheets().values().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"valueInputOption": value_input_option, "data": data},
+        )
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool(
+        "sheets", "batch_update_values", _batch_update_values, allow_retry=False
+    )
+
+
+@mcp.tool()
+async def sheets_batch_clear_values(
+    spreadsheet_id: str,
+    ranges: list[str],
+    confirm: bool = False,
+) -> str:
+    """Clear multiple Google Sheets ranges."""
+
+    def _batch_clear_values():
+        if not spreadsheet_id:
+            raise ValueError("spreadsheet_id cannot be empty")
+        if not ranges:
+            raise ValueError("ranges cannot be empty")
+        _require_confirm("batch clear Google Sheets values", confirm)
+        service, cached = client.get_service("sheets", "v4")
+        request = service.spreadsheets().values().batchClear(
+            spreadsheetId=spreadsheet_id,
+            body={"ranges": ranges},
+        )
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool(
+        "sheets", "batch_clear_values", _batch_clear_values, allow_retry=False
+    )
+
+
+@mcp.tool()
+async def sheets_batch_update(
+    spreadsheet_id: str,
+    requests: list[dict[str, Any]],
+    confirm: bool = False,
+) -> str:
+    """Run a controlled Google Sheets spreadsheet batchUpdate."""
+
+    def _batch_update():
+        if not spreadsheet_id:
+            raise ValueError("spreadsheet_id cannot be empty")
+        if not requests:
+            raise ValueError("requests cannot be empty")
+        _ensure_confirmed("run Sheets batchUpdate", confirm)
+        service, cached = client.get_service("sheets", "v4")
+        request = service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": requests},
+        )
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("sheets", "batch_update", _batch_update, allow_retry=False)
+
+
+@mcp.tool()
+async def sheets_get_by_data_filter(spreadsheet_id: str, data_filters: list[dict[str, Any]]) -> str:
+    """Fetch spreadsheet data by Google Sheets data filters."""
+
+    def _get_by_data_filter():
+        if not spreadsheet_id:
+            raise ValueError("spreadsheet_id cannot be empty")
+        if not data_filters:
+            raise ValueError("data_filters cannot be empty")
+        service, cached = client.get_service("sheets", "v4")
+        request = service.spreadsheets().getByDataFilter(
+            spreadsheetId=spreadsheet_id,
+            body={"dataFilters": data_filters},
+        )
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool(
+        "sheets", "get_by_data_filter", _get_by_data_filter, allow_retry=True
+    )
+
+
+@mcp.tool()
 async def slides_create_presentation(title: str) -> str:
     """Create a Google Slides presentation."""
 
@@ -2353,6 +2987,73 @@ async def slides_replace_text(
         return request.execute(), {"cached_service": cached}
 
     return await run_tool("slides", "replace_text", _replace, allow_retry=False)
+
+
+@mcp.tool()
+async def slides_batch_update(
+    presentation_id: str,
+    requests: list[dict[str, Any]],
+    confirm: bool = False,
+) -> str:
+    """Run a controlled Google Slides batchUpdate request."""
+
+    def _batch_update():
+        if not presentation_id:
+            raise ValueError("presentation_id cannot be empty")
+        if not requests:
+            raise ValueError("requests cannot be empty")
+        _ensure_confirmed("run Slides batchUpdate", confirm)
+        service, cached = client.get_service("slides", "v1")
+        request = service.presentations().batchUpdate(
+            presentationId=presentation_id,
+            body={"requests": requests},
+        )
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("slides", "batch_update", _batch_update, allow_retry=False)
+
+
+@mcp.tool()
+async def slides_get_page(presentation_id: str, page_object_id: str) -> str:
+    """Get one Google Slides page."""
+
+    def _get_page():
+        if not presentation_id or not page_object_id:
+            raise ValueError("presentation_id and page_object_id are required")
+        service, cached = client.get_service("slides", "v1")
+        request = service.presentations().pages().get(
+            presentationId=presentation_id,
+            pageObjectId=page_object_id,
+        )
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("slides", "get_page", _get_page, allow_retry=True)
+
+
+@mcp.tool()
+async def slides_get_page_thumbnail(
+    presentation_id: str,
+    page_object_id: str,
+    thumbnail_size: str = "MEDIUM",
+    mime_type: str = "PNG",
+) -> str:
+    """Get a thumbnail URL for a Google Slides page."""
+
+    def _get_page_thumbnail():
+        if not presentation_id or not page_object_id:
+            raise ValueError("presentation_id and page_object_id are required")
+        service, cached = client.get_service("slides", "v1")
+        request = service.presentations().pages().getThumbnail(
+            presentationId=presentation_id,
+            pageObjectId=page_object_id,
+            thumbnailProperties_thumbnailSize=thumbnail_size,
+            thumbnailProperties_mimeType=mime_type,
+        )
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool(
+        "slides", "get_page_thumbnail", _get_page_thumbnail, allow_retry=True
+    )
 
 
 @mcp.tool()
@@ -2876,6 +3577,589 @@ async def gmail_delete_message(message_id: str, confirm: bool = False) -> str:
 
 
 @mcp.tool()
+async def gmail_get_label(label_id: str) -> str:
+    """Get one Gmail label."""
+
+    def _get_label():
+        if not label_id:
+            raise ValueError("label_id cannot be empty")
+        service, cached = client.get_service("gmail", "v1")
+        request = service.users().labels().get(userId="me", id=label_id)
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("gmail", "get_label", _get_label, allow_retry=True)
+
+
+@mcp.tool()
+async def gmail_update_label(
+    label_id: str,
+    name: str = "",
+    label_list_visibility: str = "",
+    message_list_visibility: str = "",
+) -> str:
+    """Update a Gmail label."""
+
+    def _update_label():
+        if not label_id:
+            raise ValueError("label_id cannot be empty")
+        body: dict[str, Any] = {}
+        if name:
+            body["name"] = name
+        if label_list_visibility:
+            body["labelListVisibility"] = label_list_visibility
+        if message_list_visibility:
+            body["messageListVisibility"] = message_list_visibility
+        if not body:
+            raise ValueError("Provide at least one label field to update.")
+        service, cached = client.get_service("gmail", "v1")
+        request = service.users().labels().patch(userId="me", id=label_id, body=body)
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("gmail", "update_label", _update_label, allow_retry=False)
+
+
+@mcp.tool()
+async def gmail_list_drafts(max_results: int = 100, page_token: str = "") -> str:
+    """List Gmail drafts."""
+
+    def _list_drafts():
+        service, cached = client.get_service("gmail", "v1")
+        request = service.users().drafts().list(
+            userId="me",
+            maxResults=_clamp_int(max_results, minimum=1, maximum=500),
+            pageToken=page_token or None,
+        )
+        data = request.execute()
+        return _attach_page_meta(data, cached)
+
+    return await run_tool("gmail", "list_drafts", _list_drafts, allow_retry=True)
+
+
+@mcp.tool()
+async def gmail_get_draft(
+    draft_id: str,
+    format: str = "metadata",
+    metadata_headers: list[str] | None = None,
+) -> str:
+    """Get one Gmail draft."""
+
+    def _get_draft():
+        if not draft_id:
+            raise ValueError("draft_id cannot be empty")
+        service, cached = client.get_service("gmail", "v1")
+        effective_headers = metadata_headers or list(DEFAULT_GMAIL_METADATA_HEADERS)
+        request = service.users().drafts().get(
+            userId="me",
+            id=draft_id,
+            format=format,
+            metadataHeaders=effective_headers if format == "metadata" else None,
+        )
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("gmail", "get_draft", _get_draft, allow_retry=True)
+
+
+@mcp.tool()
+async def gmail_update_draft(
+    draft_id: str,
+    to: str,
+    subject: str,
+    body: str,
+    cc: str = "",
+    bcc: str = "",
+    reply_to: str = "",
+    from_alias: str = "",
+    is_html: bool = False,
+) -> str:
+    """Replace an existing Gmail draft message."""
+
+    def _update_draft():
+        if not draft_id:
+            raise ValueError("draft_id cannot be empty")
+        if not to:
+            raise ValueError("to cannot be empty")
+        if not subject:
+            raise ValueError("subject cannot be empty")
+        service, cached = client.get_service("gmail", "v1")
+        message = build_email_message(
+            to=to,
+            subject=subject,
+            body=body,
+            cc=cc,
+            bcc=bcc,
+            reply_to=reply_to,
+            from_alias=from_alias,
+            is_html=is_html,
+        )
+        request = service.users().drafts().update(
+            userId="me",
+            id=draft_id,
+            body={"id": draft_id, "message": {"raw": encode_email_message(message)}},
+        )
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("gmail", "update_draft", _update_draft, allow_retry=False)
+
+
+@mcp.tool()
+async def gmail_delete_draft(draft_id: str, confirm: bool = False) -> str:
+    """Delete a Gmail draft."""
+
+    def _delete_draft():
+        if not draft_id:
+            raise ValueError("draft_id cannot be empty")
+        _ensure_confirmed("delete a Gmail draft", confirm)
+        service, cached = client.get_service("gmail", "v1")
+        service.users().drafts().delete(userId="me", id=draft_id).execute()
+        return {"id": draft_id, "deleted": True}, {"cached_service": cached}
+
+    return await run_tool("gmail", "delete_draft", _delete_draft, allow_retry=False)
+
+
+@mcp.tool()
+async def gmail_get_attachment(
+    message_id: str,
+    attachment_id: str,
+    max_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES,
+    include_content: bool = False,
+) -> str:
+    """Fetch Gmail attachment metadata or bounded base64 content."""
+
+    def _get_attachment():
+        if not message_id:
+            raise ValueError("message_id cannot be empty")
+        if not attachment_id:
+            raise ValueError("attachment_id cannot be empty")
+        service, cached = client.get_service("gmail", "v1")
+        data = (
+            service.users()
+            .messages()
+            .attachments()
+            .get(userId="me", messageId=message_id, id=attachment_id)
+            .execute()
+        )
+        size = int(data.get("size") or 0)
+        payload: dict[str, Any] = {"attachment_id": attachment_id, "size": size}
+        if include_content:
+            if max_bytes and size > max_bytes:
+                payload.update({"too_large": True, "max_bytes": max_bytes})
+            else:
+                payload["data"] = data.get("data", "")
+        return payload, {"cached_service": cached}
+
+    return await run_tool("gmail", "get_attachment", _get_attachment, allow_retry=True)
+
+
+@mcp.tool()
+async def gmail_batch_modify_messages(
+    message_ids: list[str],
+    add_label_ids: list[str] | None = None,
+    remove_label_ids: list[str] | None = None,
+    dry_run: bool = True,
+    confirm: bool = False,
+) -> str:
+    """Batch-add or remove Gmail labels for up to 1000 messages per provider call."""
+
+    def _batch_modify():
+        ids = [message_id for message_id in (message_ids or []) if message_id]
+        if not ids:
+            raise ValueError("message_ids cannot be empty")
+        if not add_label_ids and not remove_label_ids:
+            raise ValueError("Provide add_label_ids or remove_label_ids.")
+        chunks = _chunked(ids, 1000)
+        plan = {
+            "dry_run": dry_run,
+            "message_count": len(ids),
+            "chunk_count": len(chunks),
+            "add_label_ids": add_label_ids or [],
+            "remove_label_ids": remove_label_ids or [],
+        }
+        if dry_run:
+            return plan
+        _require_confirm("batch modify Gmail messages", confirm)
+        service, cached = client.get_service("gmail", "v1")
+        for chunk in chunks:
+            service.users().messages().batchModify(
+                userId="me",
+                body={
+                    "ids": chunk,
+                    "addLabelIds": add_label_ids or [],
+                    "removeLabelIds": remove_label_ids or [],
+                },
+            ).execute()
+        return {**plan, "applied": True}, {"cached_service": cached}
+
+    return await run_tool("gmail", "batch_modify_messages", _batch_modify, allow_retry=False)
+
+
+@mcp.tool()
+async def gmail_batch_delete_messages(
+    message_ids: list[str],
+    dry_run: bool = True,
+    confirm: bool = False,
+) -> str:
+    """Permanently delete Gmail messages in provider-supported batches."""
+
+    def _batch_delete():
+        ids = [message_id for message_id in (message_ids or []) if message_id]
+        if not ids:
+            raise ValueError("message_ids cannot be empty")
+        chunks = _chunked(ids, 1000)
+        plan = {"dry_run": dry_run, "message_count": len(ids), "chunk_count": len(chunks)}
+        if dry_run:
+            return plan
+        _require_confirm("permanently batch delete Gmail messages", confirm)
+        service, cached = client.get_service("gmail", "v1")
+        for chunk in chunks:
+            service.users().messages().batchDelete(
+                userId="me",
+                body={"ids": chunk},
+            ).execute()
+        return {**plan, "deleted": True}, {"cached_service": cached}
+
+    return await run_tool("gmail", "batch_delete_messages", _batch_delete, allow_retry=False)
+
+
+@mcp.tool()
+async def gmail_modify_thread_labels(
+    thread_id: str,
+    add_label_ids: list[str] | None = None,
+    remove_label_ids: list[str] | None = None,
+    dry_run: bool = True,
+    confirm: bool = False,
+) -> str:
+    """Add or remove labels on a Gmail thread."""
+
+    def _modify_thread():
+        if not thread_id:
+            raise ValueError("thread_id cannot be empty")
+        if not add_label_ids and not remove_label_ids:
+            raise ValueError("Provide add_label_ids or remove_label_ids.")
+        plan = {
+            "thread_id": thread_id,
+            "dry_run": dry_run,
+            "add_label_ids": add_label_ids or [],
+            "remove_label_ids": remove_label_ids or [],
+        }
+        if dry_run:
+            return plan
+        _require_confirm("modify Gmail thread labels", confirm)
+        service, cached = client.get_service("gmail", "v1")
+        request = service.users().threads().modify(
+            userId="me",
+            id=thread_id,
+            body={"addLabelIds": add_label_ids or [], "removeLabelIds": remove_label_ids or []},
+        )
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("gmail", "modify_thread_labels", _modify_thread, allow_retry=False)
+
+
+@mcp.tool()
+async def gmail_trash_thread(thread_id: str, confirm: bool = False) -> str:
+    """Move a Gmail thread to trash."""
+
+    def _trash_thread():
+        if not thread_id:
+            raise ValueError("thread_id cannot be empty")
+        _ensure_confirmed("trash a Gmail thread", confirm)
+        service, cached = client.get_service("gmail", "v1")
+        request = service.users().threads().trash(userId="me", id=thread_id)
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("gmail", "trash_thread", _trash_thread, allow_retry=False)
+
+
+@mcp.tool()
+async def gmail_untrash_thread(thread_id: str, confirm: bool = False) -> str:
+    """Restore a Gmail thread from trash."""
+
+    def _untrash_thread():
+        if not thread_id:
+            raise ValueError("thread_id cannot be empty")
+        _ensure_confirmed("untrash a Gmail thread", confirm)
+        service, cached = client.get_service("gmail", "v1")
+        request = service.users().threads().untrash(userId="me", id=thread_id)
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("gmail", "untrash_thread", _untrash_thread, allow_retry=False)
+
+
+@mcp.tool()
+async def gmail_delete_thread(thread_id: str, confirm: bool = False) -> str:
+    """Permanently delete a Gmail thread."""
+
+    def _delete_thread():
+        if not thread_id:
+            raise ValueError("thread_id cannot be empty")
+        _require_confirm("permanently delete a Gmail thread", confirm)
+        service, cached = client.get_service("gmail", "v1")
+        service.users().threads().delete(userId="me", id=thread_id).execute()
+        return {"id": thread_id, "deleted": True}, {"cached_service": cached}
+
+    return await run_tool("gmail", "delete_thread", _delete_thread, allow_retry=False)
+
+
+@mcp.tool()
+async def gmail_list_history(
+    start_history_id: str,
+    history_types: list[str] | None = None,
+    label_id: str = "",
+    max_results: int = 100,
+    page_token: str = "",
+) -> str:
+    """List Gmail mailbox history changes from a start history ID."""
+
+    def _list_history():
+        if not start_history_id:
+            raise ValueError("start_history_id cannot be empty")
+        service, cached = client.get_service("gmail", "v1")
+        request = service.users().history().list(
+            userId="me",
+            startHistoryId=start_history_id,
+            historyTypes=history_types or None,
+            labelId=label_id or None,
+            maxResults=_clamp_int(max_results, minimum=1, maximum=500),
+            pageToken=page_token or None,
+        )
+        data = request.execute()
+        return _attach_page_meta(data, cached)
+
+    return await run_tool("gmail", "list_history", _list_history, allow_retry=True)
+
+
+@mcp.tool()
+async def gmail_mailbox_overview(
+    queries: list[str] | None = None,
+    include_labels: bool = True,
+) -> str:
+    """Return compact Gmail mailbox counts for inbox-cleanup planning."""
+
+    def _overview():
+        service, cached = client.get_service("gmail", "v1")
+        query_list = queries or [
+            "is:unread",
+            "in:inbox is:unread",
+            "category:promotions is:unread",
+            "category:social is:unread",
+            "older_than:90d is:unread",
+            "has:unsubscribe is:unread",
+        ]
+        counts = []
+        for query in query_list[:20]:
+            data = service.users().messages().list(
+                userId="me",
+                q=query,
+                maxResults=1,
+                fields="resultSizeEstimate,messages/id,nextPageToken",
+            ).execute()
+            counts.append(
+                {
+                    "query": query,
+                    "result_size_estimate": data.get("resultSizeEstimate", 0),
+                    "has_results": bool(data.get("messages")),
+                    "has_more": bool(data.get("nextPageToken")),
+                }
+            )
+        labels = []
+        if include_labels:
+            label_data = service.users().labels().list(
+                userId="me",
+                fields="labels(id,name,type)",
+            ).execute()
+            labels = label_data.get("labels", []) or []
+        return {"counts": counts, "labels": labels}, {"cached_service": cached}
+
+    return await run_tool("gmail", "mailbox_overview", _overview, allow_retry=True)
+
+
+@mcp.tool()
+async def gmail_sender_clusters(
+    query: str = "is:unread",
+    max_messages: int = 500,
+    page_size: int = 100,
+    top_n: int = 25,
+) -> str:
+    """Cluster Gmail messages by sender/domain/List-ID without fetching bodies."""
+
+    def _sender_clusters():
+        service, cached = client.get_service("gmail", "v1")
+        stubs, next_token, estimate, pages = _gmail_list_message_ids(
+            service,
+            query=query,
+            max_messages=max_messages,
+            page_size=page_size,
+        )
+        metadata = _gmail_get_metadata_batch(
+            service,
+            [stub.get("id", "") for stub in stubs],
+            max_messages=max_messages,
+        )
+        clusters: dict[str, dict[str, Any]] = {}
+        for message in metadata:
+            headers = message.get("headers", {})
+            sender = _gmail_sender_key(headers)
+            cluster = clusters.setdefault(
+                sender["key"],
+                {
+                    **sender,
+                    "count": 0,
+                    "message_ids_sample": [],
+                    "subjects_sample": [],
+                    "label_counts": Counter(),
+                },
+            )
+            cluster["count"] += 1
+            if len(cluster["message_ids_sample"]) < 25:
+                cluster["message_ids_sample"].append(message.get("id"))
+            subject = headers.get("subject", "")
+            if subject and len(cluster["subjects_sample"]) < 5:
+                cluster["subjects_sample"].append(subject[:160])
+            cluster["label_counts"].update(message.get("labelIds", []))
+        rows = sorted(clusters.values(), key=lambda item: item["count"], reverse=True)
+        for row in rows:
+            row["label_counts"] = dict(row["label_counts"].most_common(10))
+        return {
+            "query": query,
+            "sampled_messages": len(metadata),
+            "result_size_estimate": estimate,
+            "pages_scanned": pages,
+            "next_page_token": next_token or None,
+            "clusters": rows[: _clamp_int(top_n, minimum=1, maximum=100)],
+        }, {"cached_service": cached}
+
+    return await run_tool("gmail", "sender_clusters", _sender_clusters, allow_retry=True)
+
+
+@mcp.tool()
+async def gmail_cleanup_plan(
+    query: str = "is:unread",
+    max_messages: int = 500,
+    page_size: int = 100,
+    top_n: int = 25,
+    proposed_action: str = "label",
+    target_label_id: str = "",
+) -> str:
+    """Build a dry-run Gmail cleanup plan grouped by sender/domain/List-ID."""
+
+    def _cleanup_plan():
+        service, cached = client.get_service("gmail", "v1")
+        stubs, next_token, estimate, pages = _gmail_list_message_ids(
+            service,
+            query=query,
+            max_messages=max_messages,
+            page_size=page_size,
+        )
+        metadata = _gmail_get_metadata_batch(
+            service,
+            [stub.get("id", "") for stub in stubs],
+            max_messages=max_messages,
+        )
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        senders: dict[str, dict[str, str]] = {}
+        for message in metadata:
+            sender = _gmail_sender_key(message.get("headers", {}))
+            grouped[sender["key"]].append(message)
+            senders[sender["key"]] = sender
+        batches = []
+        for index, (key, messages) in enumerate(
+            sorted(grouped.items(), key=lambda item: len(item[1]), reverse=True), start=1
+        ):
+            if len(batches) >= _clamp_int(top_n, minimum=1, maximum=100):
+                break
+            sender = senders[key]
+            message_ids = [message.get("id") for message in messages if message.get("id")]
+            sample_subjects = [
+                message.get("headers", {}).get("subject", "")[:160]
+                for message in messages[:5]
+                if message.get("headers", {}).get("subject")
+            ]
+            batches.append(
+                {
+                    "batch_id": f"gmail-cleanup-{index:03d}",
+                    "query": query,
+                    "sender_key": key,
+                    "sender": sender,
+                    "message_count": len(message_ids),
+                    "message_ids_sample": message_ids[:25],
+                    "sample_subjects": sample_subjects,
+                    "proposed_action": proposed_action,
+                    "target_label_id": target_label_id or None,
+                    "apply_requires": "Call gmail_apply_cleanup_plan with dry_run=false and confirm=true.",
+                }
+            )
+        return {
+            "dry_run": True,
+            "query": query,
+            "sampled_messages": len(metadata),
+            "result_size_estimate": estimate,
+            "pages_scanned": pages,
+            "next_page_token": next_token or None,
+            "batches": batches,
+        }, {"cached_service": cached}
+
+    return await run_tool("gmail", "cleanup_plan", _cleanup_plan, allow_retry=True)
+
+
+@mcp.tool()
+async def gmail_apply_cleanup_plan(
+    message_ids: list[str],
+    action: str,
+    label_id: str = "",
+    dry_run: bool = True,
+    confirm: bool = False,
+) -> str:
+    """Apply an approved Gmail cleanup batch to explicit message IDs."""
+
+    def _apply_plan():
+        ids = [message_id for message_id in (message_ids or []) if message_id]
+        if not ids:
+            raise ValueError("message_ids cannot be empty")
+        normalized_action = (action or "").strip().lower()
+        allowed = {"label", "archive", "mark_read", "trash"}
+        if normalized_action not in allowed:
+            raise ValueError(f"action must be one of: {', '.join(sorted(allowed))}.")
+        if normalized_action == "label" and not label_id:
+            raise ValueError("label_id is required for action=label.")
+        add_labels: list[str] = []
+        remove_labels: list[str] = []
+        if normalized_action == "label":
+            add_labels = [label_id]
+        elif normalized_action == "archive":
+            remove_labels = ["INBOX"]
+        elif normalized_action == "mark_read":
+            remove_labels = ["UNREAD"]
+        plan = {
+            "dry_run": dry_run,
+            "action": normalized_action,
+            "message_count": len(ids),
+            "chunk_count": len(_chunked(ids, 1000)),
+            "add_label_ids": add_labels,
+            "remove_label_ids": remove_labels,
+        }
+        if dry_run:
+            return plan
+        _require_confirm("apply Gmail cleanup plan", confirm)
+        service, cached = client.get_service("gmail", "v1")
+        if normalized_action == "trash":
+            for message_id in ids:
+                service.users().messages().trash(userId="me", id=message_id).execute()
+        else:
+            for chunk in _chunked(ids, 1000):
+                service.users().messages().batchModify(
+                    userId="me",
+                    body={
+                        "ids": chunk,
+                        "addLabelIds": add_labels,
+                        "removeLabelIds": remove_labels,
+                    },
+                ).execute()
+        return {**plan, "applied": True}, {"cached_service": cached}
+
+    return await run_tool("gmail", "apply_cleanup_plan", _apply_plan, allow_retry=False)
+
+
+@mcp.tool()
 async def calendar_list_calendars(fields: str = "", page_token: str = "") -> str:
     """List calendars visible to the authenticated user."""
 
@@ -3210,6 +4494,840 @@ async def calendar_quick_add(calendar_id: str, text: str) -> str:
 
 
 @mcp.tool()
+async def calendar_freebusy_query(
+    items: list[dict[str, str]],
+    time_min: str,
+    time_max: str,
+    time_zone: str = "UTC",
+) -> str:
+    """Query free/busy blocks for calendars."""
+
+    def _freebusy():
+        if not items:
+            raise ValueError("items cannot be empty")
+        if not time_min or not time_max:
+            raise ValueError("time_min and time_max are required")
+        service, cached = client.get_service("calendar", "v3")
+        body = {
+            "timeMin": time_min,
+            "timeMax": time_max,
+            "timeZone": time_zone,
+            "items": items,
+        }
+        request = service.freebusy().query(body=body)
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("calendar", "freebusy_query", _freebusy, allow_retry=True)
+
+
+@mcp.tool()
+async def calendar_get_colors() -> str:
+    """Get Google Calendar color definitions."""
+
+    def _get_colors():
+        service, cached = client.get_service("calendar", "v3")
+        return service.colors().get().execute(), {"cached_service": cached}
+
+    return await run_tool("calendar", "get_colors", _get_colors, allow_retry=True)
+
+
+@mcp.tool()
+async def calendar_list_settings(page_token: str = "") -> str:
+    """List Google Calendar user settings."""
+
+    def _list_settings():
+        service, cached = client.get_service("calendar", "v3")
+        data = service.settings().list(pageToken=page_token or None).execute()
+        return _attach_page_meta(data, cached)
+
+    return await run_tool("calendar", "list_settings", _list_settings, allow_retry=True)
+
+
+@mcp.tool()
+async def calendar_get_setting(setting_id: str) -> str:
+    """Get one Google Calendar user setting."""
+
+    def _get_setting():
+        if not setting_id:
+            raise ValueError("setting_id cannot be empty")
+        service, cached = client.get_service("calendar", "v3")
+        return service.settings().get(setting=setting_id).execute(), {"cached_service": cached}
+
+    return await run_tool("calendar", "get_setting", _get_setting, allow_retry=True)
+
+
+@mcp.tool()
+async def calendar_get_calendar_list_entry(calendar_id: str) -> str:
+    """Get one CalendarList entry."""
+
+    def _get_entry():
+        if not calendar_id:
+            raise ValueError("calendar_id cannot be empty")
+        service, cached = client.get_service("calendar", "v3")
+        return service.calendarList().get(calendarId=calendar_id).execute(), {"cached_service": cached}
+
+    return await run_tool("calendar", "get_calendar_list_entry", _get_entry, allow_retry=True)
+
+
+@mcp.tool()
+async def calendar_update_calendar_list_entry(
+    calendar_id: str,
+    entry_patch: dict[str, Any],
+    confirm: bool = False,
+) -> str:
+    """Patch a CalendarList entry such as color or hidden/selected state."""
+
+    def _update_entry():
+        if not calendar_id:
+            raise ValueError("calendar_id cannot be empty")
+        if not entry_patch:
+            raise ValueError("entry_patch cannot be empty")
+        _ensure_confirmed("update a CalendarList entry", confirm)
+        service, cached = client.get_service("calendar", "v3")
+        request = service.calendarList().patch(calendarId=calendar_id, body=entry_patch)
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool(
+        "calendar", "update_calendar_list_entry", _update_entry, allow_retry=False
+    )
+
+
+@mcp.tool()
+async def calendar_delete_calendar_list_entry(calendar_id: str, confirm: bool = False) -> str:
+    """Remove a calendar from the authenticated user's CalendarList."""
+
+    def _delete_entry():
+        if not calendar_id:
+            raise ValueError("calendar_id cannot be empty")
+        _require_confirm("remove a calendar from CalendarList", confirm)
+        service, cached = client.get_service("calendar", "v3")
+        service.calendarList().delete(calendarId=calendar_id).execute()
+        return {"calendar_id": calendar_id, "removed": True}, {"cached_service": cached}
+
+    return await run_tool(
+        "calendar", "delete_calendar_list_entry", _delete_entry, allow_retry=False
+    )
+
+
+@mcp.tool()
+async def calendar_update_calendar(
+    calendar_id: str,
+    calendar_patch: dict[str, Any],
+    confirm: bool = False,
+) -> str:
+    """Patch calendar metadata."""
+
+    def _update_calendar():
+        if not calendar_id:
+            raise ValueError("calendar_id cannot be empty")
+        if not calendar_patch:
+            raise ValueError("calendar_patch cannot be empty")
+        _ensure_confirmed("update calendar metadata", confirm)
+        service, cached = client.get_service("calendar", "v3")
+        request = service.calendars().patch(calendarId=calendar_id, body=calendar_patch)
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("calendar", "update_calendar", _update_calendar, allow_retry=False)
+
+
+@mcp.tool()
+async def calendar_clear_calendar(calendar_id: str, confirm: bool = False) -> str:
+    """Clear all events from a primary calendar."""
+
+    def _clear_calendar():
+        if not calendar_id:
+            raise ValueError("calendar_id cannot be empty")
+        _require_confirm("clear all events from a calendar", confirm)
+        service, cached = client.get_service("calendar", "v3")
+        service.calendars().clear(calendarId=calendar_id).execute()
+        return {"calendar_id": calendar_id, "cleared": True}, {"cached_service": cached}
+
+    return await run_tool("calendar", "clear_calendar", _clear_calendar, allow_retry=False)
+
+
+@mcp.tool()
+async def calendar_list_event_instances(
+    calendar_id: str,
+    event_id: str,
+    time_min: str = "",
+    time_max: str = "",
+    max_results: int = 100,
+    page_token: str = "",
+) -> str:
+    """List instances of a recurring calendar event."""
+
+    def _list_instances():
+        if not calendar_id or not event_id:
+            raise ValueError("calendar_id and event_id are required")
+        service, cached = client.get_service("calendar", "v3")
+        data = service.events().instances(
+            calendarId=calendar_id,
+            eventId=event_id,
+            timeMin=time_min or None,
+            timeMax=time_max or None,
+            maxResults=_clamp_int(max_results, minimum=1, maximum=2500),
+            pageToken=page_token or None,
+        ).execute()
+        return _attach_page_meta(data, cached)
+
+    return await run_tool("calendar", "list_event_instances", _list_instances, allow_retry=True)
+
+
+@mcp.tool()
+async def calendar_move_event(
+    source_calendar_id: str,
+    destination_calendar_id: str,
+    event_id: str,
+    send_updates: str = "all",
+    confirm: bool = False,
+) -> str:
+    """Move an event to another calendar."""
+
+    def _move_event():
+        if not source_calendar_id or not destination_calendar_id or not event_id:
+            raise ValueError("source_calendar_id, destination_calendar_id, and event_id are required")
+        _require_confirm("move a calendar event", confirm)
+        service, cached = client.get_service("calendar", "v3")
+        request = service.events().move(
+            calendarId=source_calendar_id,
+            eventId=event_id,
+            destination=destination_calendar_id,
+            sendUpdates=send_updates or None,
+        )
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("calendar", "move_event", _move_event, allow_retry=False)
+
+
+@mcp.tool()
+async def calendar_import_event(calendar_id: str, event_body: dict[str, Any], confirm: bool = False) -> str:
+    """Import an event without sending notifications."""
+
+    def _import_event():
+        if not calendar_id:
+            raise ValueError("calendar_id cannot be empty")
+        if not event_body:
+            raise ValueError("event_body cannot be empty")
+        _require_confirm("import a calendar event", confirm)
+        service, cached = client.get_service("calendar", "v3")
+        request = service.events().import_(calendarId=calendar_id, body=event_body)
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("calendar", "import_event", _import_event, allow_retry=False)
+
+
+@mcp.tool()
+async def calendar_replace_event(
+    calendar_id: str,
+    event_id: str,
+    event_body: dict[str, Any],
+    send_updates: str = "all",
+    confirm: bool = False,
+) -> str:
+    """Replace a calendar event with a full event body."""
+
+    def _replace_event():
+        if not calendar_id or not event_id:
+            raise ValueError("calendar_id and event_id are required")
+        if not event_body:
+            raise ValueError("event_body cannot be empty")
+        _require_confirm("replace a calendar event", confirm)
+        service, cached = client.get_service("calendar", "v3")
+        request = service.events().update(
+            calendarId=calendar_id,
+            eventId=event_id,
+            body=event_body,
+            sendUpdates=send_updates or None,
+        )
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("calendar", "replace_event", _replace_event, allow_retry=False)
+
+
+@mcp.tool()
+async def calendar_list_acl(calendar_id: str, page_token: str = "") -> str:
+    """List Calendar ACL rules."""
+
+    def _list_acl():
+        if not calendar_id:
+            raise ValueError("calendar_id cannot be empty")
+        service, cached = client.get_service("calendar", "v3")
+        data = service.acl().list(calendarId=calendar_id, pageToken=page_token or None).execute()
+        return _attach_page_meta(data, cached)
+
+    return await run_tool("calendar", "list_acl", _list_acl, allow_retry=True)
+
+
+@mcp.tool()
+async def calendar_get_acl(calendar_id: str, rule_id: str) -> str:
+    """Get one Calendar ACL rule."""
+
+    def _get_acl():
+        if not calendar_id or not rule_id:
+            raise ValueError("calendar_id and rule_id are required")
+        service, cached = client.get_service("calendar", "v3")
+        return service.acl().get(calendarId=calendar_id, ruleId=rule_id).execute(), {"cached_service": cached}
+
+    return await run_tool("calendar", "get_acl", _get_acl, allow_retry=True)
+
+
+@mcp.tool()
+async def calendar_upsert_acl(
+    calendar_id: str,
+    rule_body: dict[str, Any],
+    rule_id: str = "",
+    confirm: bool = False,
+) -> str:
+    """Create or patch a Calendar ACL rule."""
+
+    def _upsert_acl():
+        if not calendar_id:
+            raise ValueError("calendar_id cannot be empty")
+        if not rule_body:
+            raise ValueError("rule_body cannot be empty")
+        _require_confirm("change Calendar sharing ACL", confirm)
+        service, cached = client.get_service("calendar", "v3")
+        if rule_id:
+            request = service.acl().patch(calendarId=calendar_id, ruleId=rule_id, body=rule_body)
+        else:
+            request = service.acl().insert(calendarId=calendar_id, body=rule_body)
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("calendar", "upsert_acl", _upsert_acl, allow_retry=False)
+
+
+@mcp.tool()
+async def calendar_delete_acl(calendar_id: str, rule_id: str, confirm: bool = False) -> str:
+    """Delete a Calendar ACL rule."""
+
+    def _delete_acl():
+        if not calendar_id or not rule_id:
+            raise ValueError("calendar_id and rule_id are required")
+        _require_confirm("delete Calendar sharing ACL", confirm)
+        service, cached = client.get_service("calendar", "v3")
+        service.acl().delete(calendarId=calendar_id, ruleId=rule_id).execute()
+        return {"calendar_id": calendar_id, "rule_id": rule_id, "deleted": True}, {"cached_service": cached}
+
+    return await run_tool("calendar", "delete_acl", _delete_acl, allow_retry=False)
+
+
+@mcp.tool()
+async def youtube_search(
+    query: str,
+    part: str = "snippet",
+    max_results: int = 10,
+    order: str = "relevance",
+    type: str = "",
+    page_token: str = "",
+) -> str:
+    """Search YouTube videos, channels, or playlists."""
+
+    def _search():
+        if not query:
+            raise ValueError("query cannot be empty")
+        service, cached = client.get_service("youtube", "v3")
+        data = service.search().list(
+            q=query,
+            part=part,
+            maxResults=_clamp_int(max_results, minimum=1, maximum=50),
+            order=order or None,
+            type=type or None,
+            pageToken=page_token or None,
+        ).execute()
+        return _attach_page_meta(data, cached)
+
+    return await run_tool("youtube", "search", _search, allow_retry=True)
+
+
+@mcp.tool()
+async def youtube_list_channels(
+    part: str = "snippet,statistics,contentDetails",
+    mine: bool = True,
+    channel_ids: list[str] | None = None,
+    for_username: str = "",
+    max_results: int = 10,
+    page_token: str = "",
+) -> str:
+    """List YouTube channels by authenticated user, ID, or username."""
+
+    def _list_channels():
+        service, cached = client.get_service("youtube", "v3")
+        data = service.channels().list(
+            part=part,
+            mine=mine if not channel_ids and not for_username else None,
+            id=",".join(channel_ids or []) or None,
+            forUsername=for_username or None,
+            maxResults=_clamp_int(max_results, minimum=1, maximum=50),
+            pageToken=page_token or None,
+        ).execute()
+        return _attach_page_meta(data, cached)
+
+    return await run_tool("youtube", "list_channels", _list_channels, allow_retry=True)
+
+
+@mcp.tool()
+async def youtube_list_videos(
+    video_ids: list[str],
+    part: str = "snippet,statistics,contentDetails,status",
+    max_results: int = 50,
+) -> str:
+    """List YouTube video metadata by video IDs."""
+
+    def _list_videos():
+        ids = [video_id for video_id in (video_ids or []) if video_id]
+        if not ids:
+            raise ValueError("video_ids cannot be empty")
+        service, cached = client.get_service("youtube", "v3")
+        data = service.videos().list(
+            part=part,
+            id=",".join(ids[:50]),
+            maxResults=_clamp_int(max_results, minimum=1, maximum=50),
+        ).execute()
+        return data, {"cached_service": cached}
+
+    return await run_tool("youtube", "list_videos", _list_videos, allow_retry=True)
+
+
+@mcp.tool()
+async def youtube_list_playlists(
+    part: str = "snippet,contentDetails,status",
+    mine: bool = True,
+    channel_id: str = "",
+    max_results: int = 25,
+    page_token: str = "",
+) -> str:
+    """List YouTube playlists."""
+
+    def _list_playlists():
+        service, cached = client.get_service("youtube", "v3")
+        data = service.playlists().list(
+            part=part,
+            mine=mine if not channel_id else None,
+            channelId=channel_id or None,
+            maxResults=_clamp_int(max_results, minimum=1, maximum=50),
+            pageToken=page_token or None,
+        ).execute()
+        return _attach_page_meta(data, cached)
+
+    return await run_tool("youtube", "list_playlists", _list_playlists, allow_retry=True)
+
+
+@mcp.tool()
+async def youtube_list_playlist_items(
+    playlist_id: str,
+    part: str = "snippet,contentDetails,status",
+    max_results: int = 25,
+    page_token: str = "",
+) -> str:
+    """List items in a YouTube playlist."""
+
+    def _list_playlist_items():
+        if not playlist_id:
+            raise ValueError("playlist_id cannot be empty")
+        service, cached = client.get_service("youtube", "v3")
+        data = service.playlistItems().list(
+            playlistId=playlist_id,
+            part=part,
+            maxResults=_clamp_int(max_results, minimum=1, maximum=50),
+            pageToken=page_token or None,
+        ).execute()
+        return _attach_page_meta(data, cached)
+
+    return await run_tool(
+        "youtube", "list_playlist_items", _list_playlist_items, allow_retry=True
+    )
+
+
+@mcp.tool()
+async def youtube_list_comment_threads(
+    part: str = "snippet,replies",
+    video_id: str = "",
+    channel_id: str = "",
+    max_results: int = 20,
+    page_token: str = "",
+) -> str:
+    """List YouTube comment threads for a video or channel."""
+
+    def _list_comment_threads():
+        if not video_id and not channel_id:
+            raise ValueError("video_id or channel_id is required")
+        service, cached = client.get_service("youtube", "v3")
+        data = service.commentThreads().list(
+            part=part,
+            videoId=video_id or None,
+            channelId=channel_id or None,
+            maxResults=_clamp_int(max_results, minimum=1, maximum=100),
+            pageToken=page_token or None,
+        ).execute()
+        return _attach_page_meta(data, cached)
+
+    return await run_tool(
+        "youtube", "list_comment_threads", _list_comment_threads, allow_retry=True
+    )
+
+
+@mcp.tool()
+async def analytics_run_report(property_id: str, report_request: dict[str, Any]) -> str:
+    """Run a Google Analytics Data API report."""
+
+    def _run_report():
+        if not property_id:
+            raise ValueError("property_id cannot be empty")
+        if not report_request:
+            raise ValueError("report_request cannot be empty")
+        url = f"https://analyticsdata.googleapis.com/v1beta/properties/{property_id}:runReport"
+        return _google_json_request("POST", url, json_body=report_request)
+
+    return await run_tool("analytics", "run_report", _run_report, allow_retry=True)
+
+
+@mcp.tool()
+async def analytics_batch_run_reports(property_id: str, requests: list[dict[str, Any]]) -> str:
+    """Run multiple Google Analytics Data API reports."""
+
+    def _batch_run_reports():
+        if not property_id:
+            raise ValueError("property_id cannot be empty")
+        if not requests:
+            raise ValueError("requests cannot be empty")
+        url = f"https://analyticsdata.googleapis.com/v1beta/properties/{property_id}:batchRunReports"
+        return _google_json_request("POST", url, json_body={"requests": requests})
+
+    return await run_tool("analytics", "batch_run_reports", _batch_run_reports, allow_retry=True)
+
+
+@mcp.tool()
+async def analytics_run_realtime_report(property_id: str, report_request: dict[str, Any]) -> str:
+    """Run a Google Analytics realtime report."""
+
+    def _run_realtime_report():
+        if not property_id:
+            raise ValueError("property_id cannot be empty")
+        if not report_request:
+            raise ValueError("report_request cannot be empty")
+        url = f"https://analyticsdata.googleapis.com/v1beta/properties/{property_id}:runRealtimeReport"
+        return _google_json_request("POST", url, json_body=report_request)
+
+    return await run_tool(
+        "analytics", "run_realtime_report", _run_realtime_report, allow_retry=True
+    )
+
+
+@mcp.tool()
+async def analytics_get_metadata(property_id: str) -> str:
+    """Get Google Analytics Data API metadata for a property."""
+
+    def _get_metadata():
+        if not property_id:
+            raise ValueError("property_id cannot be empty")
+        url = f"https://analyticsdata.googleapis.com/v1beta/properties/{property_id}/metadata"
+        return _google_json_request("GET", url)
+
+    return await run_tool("analytics", "get_metadata", _get_metadata, allow_retry=True)
+
+
+@mcp.tool()
+async def searchconsole_list_sites() -> str:
+    """List Search Console sites available to the authenticated user."""
+
+    def _list_sites():
+        service, cached = client.get_service("searchconsole", "v1")
+        return service.sites().list().execute(), {"cached_service": cached}
+
+    return await run_tool("searchconsole", "list_sites", _list_sites, allow_retry=True)
+
+
+@mcp.tool()
+async def searchconsole_query_search_analytics(site_url: str, request_body: dict[str, Any]) -> str:
+    """Query Search Console search analytics."""
+
+    def _query_search_analytics():
+        if not site_url:
+            raise ValueError("site_url cannot be empty")
+        if not request_body:
+            raise ValueError("request_body cannot be empty")
+        service, cached = client.get_service("searchconsole", "v1")
+        request = service.searchanalytics().query(siteUrl=site_url, body=request_body)
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool(
+        "searchconsole", "query_search_analytics", _query_search_analytics, allow_retry=True
+    )
+
+
+@mcp.tool()
+async def searchconsole_inspect_url(site_url: str, inspection_url: str, language_code: str = "en-US") -> str:
+    """Inspect one URL with Search Console URL Inspection API."""
+
+    def _inspect_url():
+        if not site_url or not inspection_url:
+            raise ValueError("site_url and inspection_url are required")
+        service, cached = client.get_service("searchconsole", "v1")
+        request = service.urlInspection().index().inspect(
+            body={
+                "siteUrl": site_url,
+                "inspectionUrl": inspection_url,
+                "languageCode": language_code,
+            }
+        )
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool("searchconsole", "inspect_url", _inspect_url, allow_retry=True)
+
+
+@mcp.tool()
+async def searchconsole_list_sitemaps(site_url: str) -> str:
+    """List Search Console sitemaps for a site."""
+
+    def _list_sitemaps():
+        if not site_url:
+            raise ValueError("site_url cannot be empty")
+        service, cached = client.get_service("searchconsole", "v1")
+        return service.sitemaps().list(siteUrl=site_url).execute(), {"cached_service": cached}
+
+    return await run_tool("searchconsole", "list_sitemaps", _list_sitemaps, allow_retry=True)
+
+
+@mcp.tool()
+async def business_profile_list_accounts() -> str:
+    """List Google Business Profile accounts."""
+
+    def _list_accounts():
+        service, cached = client.get_service("mybusinessaccountmanagement", "v1")
+        return service.accounts().list().execute(), {"cached_service": cached}
+
+    return await run_tool("business_profile", "list_accounts", _list_accounts, allow_retry=True)
+
+
+@mcp.tool()
+async def business_profile_list_locations(
+    account_name: str,
+    read_mask: str = "name,title,storefrontAddress,phoneNumbers,websiteUri,metadata,categories",
+    page_size: int = 50,
+    page_token: str = "",
+) -> str:
+    """List Google Business Profile locations for an account."""
+
+    def _list_locations():
+        if not account_name:
+            raise ValueError("account_name cannot be empty, for example accounts/123")
+        service, cached = client.get_service("mybusinessbusinessinformation", "v1")
+        data = service.accounts().locations().list(
+            parent=account_name,
+            readMask=read_mask,
+            pageSize=_clamp_int(page_size, minimum=1, maximum=100),
+            pageToken=page_token or None,
+        ).execute()
+        return _attach_page_meta(data, cached)
+
+    return await run_tool(
+        "business_profile", "list_locations", _list_locations, allow_retry=True
+    )
+
+
+@mcp.tool()
+async def business_profile_get_location(
+    location_name: str,
+    read_mask: str = "name,title,storefrontAddress,phoneNumbers,websiteUri,metadata,categories",
+) -> str:
+    """Get one Google Business Profile location."""
+
+    def _get_location():
+        if not location_name:
+            raise ValueError("location_name cannot be empty, for example locations/123")
+        service, cached = client.get_service("mybusinessbusinessinformation", "v1")
+        data = service.locations().get(name=location_name, readMask=read_mask).execute()
+        return data, {"cached_service": cached}
+
+    return await run_tool("business_profile", "get_location", _get_location, allow_retry=True)
+
+
+@mcp.tool()
+async def business_profile_fetch_performance(
+    location_name: str,
+    daily_metrics: list[str],
+    start_date: dict[str, int],
+    end_date: dict[str, int],
+) -> str:
+    """Fetch Google Business Profile daily performance metrics."""
+
+    def _fetch_performance():
+        if not location_name:
+            raise ValueError("location_name cannot be empty, for example locations/123")
+        if not daily_metrics:
+            raise ValueError("daily_metrics cannot be empty")
+        service, cached = client.get_service("businessprofileperformance", "v1")
+        request = service.locations().fetchMultiDailyMetricsTimeSeries(
+            location=location_name,
+            dailyMetrics=daily_metrics,
+            dailyRange_startDate_year=start_date.get("year"),
+            dailyRange_startDate_month=start_date.get("month"),
+            dailyRange_startDate_day=start_date.get("day"),
+            dailyRange_endDate_year=end_date.get("year"),
+            dailyRange_endDate_month=end_date.get("month"),
+            dailyRange_endDate_day=end_date.get("day"),
+        )
+        return request.execute(), {"cached_service": cached}
+
+    return await run_tool(
+        "business_profile", "fetch_performance", _fetch_performance, allow_retry=True
+    )
+
+
+@mcp.tool()
+async def maps_geocode(address: str, language: str = "en", region: str = "") -> str:
+    """Geocode an address with Google Maps Geocoding API."""
+
+    def _geocode():
+        if not address:
+            raise ValueError("address cannot be empty")
+        return _maps_request(
+            "GET",
+            "https://maps.googleapis.com/maps/api/geocode/json",
+            params={"address": address, "language": language, "region": region or None},
+        )
+
+    return await run_tool("maps", "geocode", _geocode, allow_retry=True)
+
+
+@mcp.tool()
+async def maps_reverse_geocode(lat: float, lng: float, language: str = "en") -> str:
+    """Reverse geocode latitude/longitude with Google Maps."""
+
+    def _reverse_geocode():
+        return _maps_request(
+            "GET",
+            "https://maps.googleapis.com/maps/api/geocode/json",
+            params={"latlng": f"{lat},{lng}", "language": language},
+        )
+
+    return await run_tool("maps", "reverse_geocode", _reverse_geocode, allow_retry=True)
+
+
+@mcp.tool()
+async def maps_place_text_search(query: str, included_type: str = "", max_result_count: int = 10) -> str:
+    """Search Google Places with text search."""
+
+    def _place_text_search():
+        if not query:
+            raise ValueError("query cannot be empty")
+        body: dict[str, Any] = {
+            "textQuery": query,
+            "maxResultCount": _clamp_int(max_result_count, minimum=1, maximum=20),
+        }
+        if included_type:
+            body["includedType"] = included_type
+        return _maps_request(
+            "POST",
+            "https://places.googleapis.com/v1/places:searchText",
+            json_body=body,
+            headers={
+                "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.userRatingCount"
+            },
+        )
+
+    return await run_tool("maps", "place_text_search", _place_text_search, allow_retry=True)
+
+
+@mcp.tool()
+async def maps_place_details(place_id: str, field_mask: str = "id,displayName,formattedAddress,location,rating,userRatingCount,websiteUri,nationalPhoneNumber") -> str:
+    """Get Google Places details."""
+
+    def _place_details():
+        if not place_id:
+            raise ValueError("place_id cannot be empty")
+        return _maps_request(
+            "GET",
+            f"https://places.googleapis.com/v1/places/{place_id}",
+            headers={"X-Goog-FieldMask": field_mask},
+        )
+
+    return await run_tool("maps", "place_details", _place_details, allow_retry=True)
+
+
+@mcp.tool()
+async def maps_compute_routes(route_request: dict[str, Any]) -> str:
+    """Compute routes with Google Maps Routes API."""
+
+    def _compute_routes():
+        if not route_request:
+            raise ValueError("route_request cannot be empty")
+        return _maps_request(
+            "POST",
+            "https://routes.googleapis.com/directions/v2:computeRoutes",
+            json_body=route_request,
+            headers={
+                "X-Goog-FieldMask": "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline,routes.legs"
+            },
+        )
+
+    return await run_tool("maps", "compute_routes", _compute_routes, allow_retry=True)
+
+
+@mcp.tool()
+async def merchant_list_products(merchant_id: str, max_results: int = 50, page_token: str = "") -> str:
+    """List Merchant Center products with Content API for Shopping."""
+
+    def _list_products():
+        if not merchant_id:
+            raise ValueError("merchant_id cannot be empty")
+        service, cached = client.get_service("content", "v2.1")
+        data = service.products().list(
+            merchantId=merchant_id,
+            maxResults=_clamp_int(max_results, minimum=1, maximum=250),
+            pageToken=page_token or None,
+        ).execute()
+        return _attach_page_meta(data, cached)
+
+    return await run_tool("merchant", "list_products", _list_products, allow_retry=True)
+
+
+@mcp.tool()
+async def merchant_get_product(merchant_id: str, product_id: str) -> str:
+    """Get one Merchant Center product."""
+
+    def _get_product():
+        if not merchant_id or not product_id:
+            raise ValueError("merchant_id and product_id are required")
+        service, cached = client.get_service("content", "v2.1")
+        data = service.products().get(merchantId=merchant_id, productId=product_id).execute()
+        return data, {"cached_service": cached}
+
+    return await run_tool("merchant", "get_product", _get_product, allow_retry=True)
+
+
+@mcp.tool()
+async def adsense_list_accounts(page_size: int = 50, page_token: str = "") -> str:
+    """List Google AdSense accounts."""
+
+    def _list_accounts():
+        service, cached = client.get_service("adsense", "v2")
+        data = service.accounts().list(
+            pageSize=_clamp_int(page_size, minimum=1, maximum=100),
+            pageToken=page_token or None,
+        ).execute()
+        return _attach_page_meta(data, cached)
+
+    return await run_tool("adsense", "list_accounts", _list_accounts, allow_retry=True)
+
+
+@mcp.tool()
+async def adsense_generate_report(account_name: str, report_request: dict[str, Any]) -> str:
+    """Generate an AdSense report."""
+
+    def _generate_report():
+        if not account_name:
+            raise ValueError("account_name cannot be empty, for example accounts/pub-123")
+        if not report_request:
+            raise ValueError("report_request cannot be empty")
+        service, cached = client.get_service("adsense", "v2")
+        data = service.accounts().reports().generate(parent=account_name, **report_request).execute()
+        return data, {"cached_service": cached}
+
+    return await run_tool("adsense", "generate_report", _generate_report, allow_retry=True)
+
+
+@mcp.tool()
 async def google_mcp_welcome() -> str:
     """Show Google MCP navigation, setup requirements, and safe starting points."""
 
@@ -3230,6 +5348,9 @@ async def google_mcp_welcome() -> str:
                 MCP_GOOGLE_CLIENT_ID_HEADER,
                 MCP_GOOGLE_CLIENT_SECRET_HEADER,
                 MCP_GOOGLE_REFRESH_TOKEN_HEADER,
+            ],
+            "optional_headers": [
+                MCP_GOOGLE_MAPS_API_KEY_HEADER,
             ],
             "recommended_start": [
                 "google_mcp_list_capabilities",
@@ -3562,6 +5683,359 @@ async def mcp_health_check(
     return await run_tool("mcp", "health_check", _health_check, allow_retry=False)
 
 
+EXPANDED_READ_TOOLS = {
+    "drive_about_get",
+    "drive_list_permissions",
+    "drive_get_permission",
+    "drive_list_comments",
+    "drive_list_revisions",
+    "drive_list_shared_drives",
+    "sheets_get_by_data_filter",
+    "slides_get_page",
+    "slides_get_page_thumbnail",
+    "gmail_get_label",
+    "gmail_list_drafts",
+    "gmail_get_draft",
+    "gmail_get_attachment",
+    "gmail_list_history",
+    "gmail_mailbox_overview",
+    "gmail_sender_clusters",
+    "gmail_cleanup_plan",
+    "calendar_freebusy_query",
+    "calendar_get_colors",
+    "calendar_list_settings",
+    "calendar_get_setting",
+    "calendar_get_calendar_list_entry",
+    "calendar_list_event_instances",
+    "calendar_list_acl",
+    "calendar_get_acl",
+    "youtube_search",
+    "youtube_list_channels",
+    "youtube_list_videos",
+    "youtube_list_playlists",
+    "youtube_list_playlist_items",
+    "youtube_list_comment_threads",
+    "analytics_run_report",
+    "analytics_batch_run_reports",
+    "analytics_run_realtime_report",
+    "analytics_get_metadata",
+    "searchconsole_list_sites",
+    "searchconsole_query_search_analytics",
+    "searchconsole_inspect_url",
+    "searchconsole_list_sitemaps",
+    "business_profile_list_accounts",
+    "business_profile_list_locations",
+    "business_profile_get_location",
+    "business_profile_fetch_performance",
+    "maps_geocode",
+    "maps_reverse_geocode",
+    "maps_place_text_search",
+    "maps_place_details",
+    "maps_compute_routes",
+    "merchant_list_products",
+    "merchant_get_product",
+    "adsense_list_accounts",
+    "adsense_generate_report",
+}
+
+EXPANDED_WRITE_TOOLS = {
+    "drive_copy_file",
+    "drive_create_comment",
+    "gmail_update_label",
+    "gmail_update_draft",
+    "gmail_modify_thread_labels",
+    "calendar_update_calendar_list_entry",
+    "calendar_update_calendar",
+}
+
+EXPANDED_DESTRUCTIVE_TOOLS = {
+    "drive_create_permission",
+    "drive_update_permission",
+    "drive_delete_permission",
+    "drive_update_comment",
+    "drive_delete_comment",
+    "drive_update_file_metadata",
+    "docs_batch_update",
+    "sheets_append_values",
+    "sheets_clear_values",
+    "sheets_batch_update_values",
+    "sheets_batch_clear_values",
+    "sheets_batch_update",
+    "slides_batch_update",
+    "gmail_batch_modify_messages",
+    "gmail_batch_delete_messages",
+    "gmail_delete_draft",
+    "gmail_trash_thread",
+    "gmail_untrash_thread",
+    "gmail_delete_thread",
+    "gmail_apply_cleanup_plan",
+    "calendar_delete_calendar_list_entry",
+    "calendar_clear_calendar",
+    "calendar_move_event",
+    "calendar_import_event",
+    "calendar_replace_event",
+    "calendar_upsert_acl",
+    "calendar_delete_acl",
+}
+
+EXPANDED_TOOL_DESCRIPTIONS = {
+    "gmail_mailbox_overview": "Use this read-only Gmail workflow tool to get compact counts for unread/inbox cleanup planning without fetching message bodies.",
+    "gmail_sender_clusters": "Use this read-only Gmail workflow tool to group large unread/search result sets by sender, domain, and List-ID with capped samples.",
+    "gmail_cleanup_plan": "Use this read-only Gmail workflow tool to propose cleanup batches that must be approved before mutation.",
+    "gmail_apply_cleanup_plan": "Use this destructive Gmail workflow tool only after approving an explicit cleanup batch; dry_run defaults to true.",
+    "gmail_batch_modify_messages": "Use this destructive Gmail tool to apply label changes to explicit message IDs in provider-sized chunks; dry_run defaults to true.",
+    "gmail_batch_delete_messages": "Use this destructive Gmail tool only for approved permanent batch deletion of explicit message IDs; dry_run defaults to true.",
+    "youtube_search": "Use this read-only YouTube Data API tool to search videos, channels, or playlists with compact pagination.",
+    "analytics_run_report": "Use this read-only Google Analytics Data API tool to run GA4 reports for an accessible property.",
+    "searchconsole_query_search_analytics": "Use this read-only Search Console tool to query website search performance data.",
+    "business_profile_fetch_performance": "Use this read-only Google Business Profile tool to fetch daily location performance metrics.",
+    "maps_place_text_search": "Use this read-only Google Maps Places tool for business/place discovery; requires Maps API key configuration.",
+    "maps_compute_routes": "Use this read-only Google Maps Routes tool for route estimates; requires Maps API key and can incur Maps Platform usage.",
+}
+
+
+def _extend_expanded_google_surface_metadata() -> None:
+    READ_ONLY_TOOLS.update(EXPANDED_READ_TOOLS)
+    WRITE_TOOLS.update(EXPANDED_WRITE_TOOLS)
+    DESTRUCTIVE_TOOLS.update(EXPANDED_DESTRUCTIVE_TOOLS)
+    TOOL_DESCRIPTIONS.update(EXPANDED_TOOL_DESCRIPTIONS)
+    COMMON_PARAMETER_DESCRIPTIONS.update(
+        {
+            "dry_run": "When true, return the planned operation without mutating provider data.",
+            "action": "Cleanup or mutation action to perform after approval.",
+            "target_label_id": "Gmail label ID proposed for cleanup batches.",
+            "start_history_id": "Gmail history ID to begin incremental history listing.",
+            "history_types": "Gmail history event type filters.",
+            "attachment_id": "Gmail attachment ID from a message payload part.",
+            "permission_id": "Google Drive permission ID.",
+            "permission_body": "Google Drive permission request body.",
+            "comment_id": "Google Drive comment ID.",
+            "metadata": "Provider metadata patch body.",
+            "requests": "Provider batchUpdate request objects.",
+            "data": "Google Sheets values batch update data entries.",
+            "data_filters": "Google Sheets data filter objects.",
+            "page_object_id": "Google Slides page object ID.",
+            "thumbnail_size": "Google Slides thumbnail size.",
+            "rule_id": "Google Calendar ACL rule ID.",
+            "rule_body": "Google Calendar ACL rule request body.",
+            "items": "Google Calendar freebusy items, each with an id field.",
+            "source_calendar_id": "Source Google Calendar ID.",
+            "destination_calendar_id": "Destination Google Calendar ID.",
+            "event_body": "Google Calendar event request body.",
+            "part": "Google API partial resource selector such as snippet or statistics.",
+            "channel_ids": "YouTube channel IDs.",
+            "for_username": "Legacy YouTube username lookup.",
+            "video_ids": "YouTube video IDs.",
+            "video_id": "YouTube video ID.",
+            "playlist_id": "YouTube playlist ID.",
+            "property_id": "Google Analytics property ID without the properties/ prefix.",
+            "report_request": "Google Analytics report request body.",
+            "site_url": "Search Console site URL or sc-domain property.",
+            "inspection_url": "URL to inspect in Search Console.",
+            "language_code": "BCP-47 language code for Search Console inspection output.",
+            "account_name": "Google Business Profile or AdSense account resource name.",
+            "location_name": "Google Business Profile location resource name.",
+            "read_mask": "Google field mask selecting returned Business Profile fields.",
+            "daily_metrics": "Business Profile performance daily metric names.",
+            "start_date": "Date object with year, month, and day.",
+            "end_date": "Date object with year, month, and day.",
+            "lat": "Latitude.",
+            "lng": "Longitude.",
+            "included_type": "Optional Google Places included type filter.",
+            "max_result_count": "Maximum number of Maps/Places results.",
+            "place_id": "Google Maps Place ID.",
+            "field_mask": "Google field mask selecting returned fields.",
+            "route_request": "Google Routes API computeRoutes request body.",
+            "merchant_id": "Google Merchant Center merchant ID.",
+            "product_id": "Google Merchant Center product ID.",
+        }
+    )
+    PARAMETER_ENUMS.update(
+        {
+            "action": ["label", "archive", "mark_read", "trash"],
+            "proposed_action": ["label", "archive", "mark_read", "trash"],
+            "thumbnail_size": ["THUMBNAIL_SIZE_UNSPECIFIED", "LARGE", "MEDIUM", "SMALL"],
+            "mime_type": ["PNG", "JPEG"],
+            "insert_data_option": ["OVERWRITE", "INSERT_ROWS"],
+            "type": ["", "video", "channel", "playlist"],
+            "order": ["date", "rating", "relevance", "title", "videoCount", "viewCount"],
+        }
+    )
+    CAPABILITY_GROUPS.extend(
+        [
+            {
+                "category": "Gmail API v1 inbox scale workflows",
+                "read": [
+                    "gmail_mailbox_overview",
+                    "gmail_sender_clusters",
+                    "gmail_cleanup_plan",
+                ],
+                "write": [],
+                "destructive": [
+                    "gmail_apply_cleanup_plan",
+                    "gmail_batch_modify_messages",
+                    "gmail_batch_delete_messages",
+                ],
+            },
+            {
+                "category": "Workspace depth tools",
+                "read": sorted(
+                    {
+                        "drive_about_get",
+                        "drive_list_permissions",
+                        "drive_get_permission",
+                        "drive_list_comments",
+                        "drive_list_revisions",
+                        "drive_list_shared_drives",
+                        "sheets_get_by_data_filter",
+                        "slides_get_page",
+                        "slides_get_page_thumbnail",
+                        "calendar_freebusy_query",
+                        "calendar_get_colors",
+                        "calendar_list_settings",
+                        "calendar_get_setting",
+                        "calendar_get_calendar_list_entry",
+                        "calendar_list_event_instances",
+                        "calendar_list_acl",
+                        "calendar_get_acl",
+                    }
+                ),
+                "write": sorted(EXPANDED_WRITE_TOOLS),
+                "destructive": sorted(
+                    EXPANDED_DESTRUCTIVE_TOOLS
+                    - {
+                        "gmail_apply_cleanup_plan",
+                        "gmail_batch_modify_messages",
+                        "gmail_batch_delete_messages",
+                    }
+                ),
+            },
+            {
+                "category": "YouTube Data API v3",
+                "read": [
+                    "youtube_search",
+                    "youtube_list_channels",
+                    "youtube_list_videos",
+                    "youtube_list_playlists",
+                    "youtube_list_playlist_items",
+                    "youtube_list_comment_threads",
+                ],
+                "write": [],
+                "destructive": [],
+            },
+            {
+                "category": "Business analytics and web presence",
+                "read": [
+                    "analytics_run_report",
+                    "analytics_batch_run_reports",
+                    "analytics_run_realtime_report",
+                    "analytics_get_metadata",
+                    "searchconsole_list_sites",
+                    "searchconsole_query_search_analytics",
+                    "searchconsole_inspect_url",
+                    "searchconsole_list_sitemaps",
+                    "business_profile_list_accounts",
+                    "business_profile_list_locations",
+                    "business_profile_get_location",
+                    "business_profile_fetch_performance",
+                    "merchant_list_products",
+                    "merchant_get_product",
+                    "adsense_list_accounts",
+                    "adsense_generate_report",
+                ],
+                "write": [],
+                "destructive": [],
+            },
+            {
+                "category": "Google Maps Platform",
+                "read": [
+                    "maps_geocode",
+                    "maps_reverse_geocode",
+                    "maps_place_text_search",
+                    "maps_place_details",
+                    "maps_compute_routes",
+                ],
+                "write": [],
+                "destructive": [],
+            },
+        ]
+    )
+    ENDPOINT_COVERAGE.extend(
+        [
+            {
+                "api": "gmail",
+                "resource": "users.messages/users.threads/users.drafts/users.history",
+                "status": "partially_implemented",
+                "implemented": [
+                    "messages.batchDelete",
+                    "messages.batchModify",
+                    "threads.modify",
+                    "threads.trash",
+                    "threads.untrash",
+                    "threads.delete",
+                    "drafts.delete",
+                    "drafts.get",
+                    "drafts.list",
+                    "drafts.update",
+                    "history.list",
+                    "messages.attachments.get",
+                ],
+                "missing": ["messages.import", "messages.insert", "users.watch", "users.stop"],
+                "tool_refs": sorted(EXPANDED_READ_TOOLS | EXPANDED_DESTRUCTIVE_TOOLS),
+            },
+            {
+                "api": "youtube",
+                "resource": "channels/videos/playlists/playlistItems/search/commentThreads",
+                "status": "partially_implemented",
+                "implemented": ["channels.list", "videos.list", "playlists.list", "playlistItems.list", "search.list", "commentThreads.list"],
+                "missing": ["captions.*", "comments.*", "subscriptions.*", "members.*", "uploads and mutations"],
+                "tool_refs": ["youtube_search", "youtube_list_channels", "youtube_list_videos", "youtube_list_playlists", "youtube_list_playlist_items", "youtube_list_comment_threads"],
+            },
+            {
+                "api": "analytics",
+                "resource": "properties",
+                "status": "partially_implemented",
+                "implemented": ["runReport", "batchRunReports", "runRealtimeReport", "getMetadata"],
+                "missing": ["runPivotReport", "batchRunPivotReports", "checkCompatibility", "audienceExports.*"],
+                "tool_refs": ["analytics_run_report", "analytics_batch_run_reports", "analytics_run_realtime_report", "analytics_get_metadata"],
+            },
+            {
+                "api": "searchconsole",
+                "resource": "sites/sitemaps/searchanalytics/urlInspection",
+                "status": "partially_implemented",
+                "implemented": ["sites.list", "sitemaps.list", "searchanalytics.query", "urlInspection.index.inspect"],
+                "missing": ["sites.add", "sites.delete", "sitemaps.submit", "sitemaps.delete"],
+                "tool_refs": ["searchconsole_list_sites", "searchconsole_query_search_analytics", "searchconsole_inspect_url", "searchconsole_list_sitemaps"],
+            },
+            {
+                "api": "business_profile",
+                "resource": "accounts/locations/performance",
+                "status": "partially_implemented",
+                "implemented": ["accounts.list", "accounts.locations.list", "locations.get", "locations.fetchMultiDailyMetricsTimeSeries"],
+                "missing": ["location mutation", "verifications", "notifications", "qanda", "place actions"],
+                "tool_refs": ["business_profile_list_accounts", "business_profile_list_locations", "business_profile_get_location", "business_profile_fetch_performance"],
+            },
+            {
+                "api": "maps",
+                "resource": "geocoding/places/routes",
+                "status": "partially_implemented",
+                "implemented": ["geocode", "reverse_geocode", "places.searchText", "places.get", "routes.computeRoutes"],
+                "missing": ["route optimization", "roads", "static maps", "distance matrix migration variants"],
+                "tool_refs": ["maps_geocode", "maps_reverse_geocode", "maps_place_text_search", "maps_place_details", "maps_compute_routes"],
+            },
+            {
+                "api": "merchant_ads_adsense",
+                "resource": "merchant/content/adsense/google-ads",
+                "status": "blocked_scope",
+                "implemented": ["content.products.list", "content.products.get", "adsense.accounts.list", "adsense.reports.generate"],
+                "missing": ["Merchant mutations", "Google Ads API", "Merchant API v1 productInputs"],
+                "tool_refs": ["merchant_list_products", "merchant_get_product", "adsense_list_accounts", "adsense_generate_report", "google_raw_request"],
+            },
+        ]
+    )
+
+
+_extend_expanded_google_surface_metadata()
 _apply_tool_metadata()
 
 
@@ -3758,6 +6232,9 @@ def build_hosted_mcp_http_wrapper(app):
                             MCP_GOOGLE_CLIENT_SECRET_HEADER: MCP_REQUIRE_REQUEST_GOOGLE_CLIENT_SECRET,
                             MCP_GOOGLE_REFRESH_TOKEN_HEADER: MCP_REQUIRE_REQUEST_GOOGLE_REFRESH_TOKEN,
                         },
+                        "optional_headers": {
+                            MCP_GOOGLE_MAPS_API_KEY_HEADER: bool(GOOGLE_MAPS_API_KEY),
+                        },
                     },
                 },
                 extra_headers=[(b"cache-control", b"no-store")],
@@ -3861,10 +6338,12 @@ def build_hosted_mcp_http_wrapper(app):
             return
 
         token = ACTIVE_GOOGLE_CLIENT.set(request_client)
+        headers_token = ACTIVE_REQUEST_HEADERS.set(normalized_headers)
         try:
             next_receive = _replay_receive(body) if consumed_body else receive
             await app(scope, next_receive, send)
         finally:
+            ACTIVE_REQUEST_HEADERS.reset(headers_token)
             ACTIVE_GOOGLE_CLIENT.reset(token)
 
     return _wrapped

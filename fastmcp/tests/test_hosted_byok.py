@@ -193,6 +193,40 @@ def test_gmail_batch_metadata_camel_case_alias_is_normalized():
     assert args["metadata_headers"] == ["Subject"]
 
 
+def test_gmail_sender_key_prefers_list_id_then_domain():
+    sender = gm._gmail_sender_key(
+        {
+            "from": "Example Sender <news@example.com>",
+            "list-id": "Example List <list.example.com>",
+        }
+    )
+    assert sender["key"] == "example list <list.example.com>"
+    assert sender["sender_email"] == "news@example.com"
+    assert sender["domain"] == "example.com"
+
+    sender = gm._gmail_sender_key({"from": "Noise <promo@example.org>"})
+    assert sender["key"] == "example.org"
+
+
+def test_chunked_uses_provider_sized_batches():
+    chunks = gm._chunked(list(range(2501)), 1000)
+    assert [len(chunk) for chunk in chunks] == [1000, 1000, 501]
+
+
+def test_maps_api_key_requires_header_or_env(monkeypatch):
+    monkeypatch.setattr(gm, "GOOGLE_MAPS_API_KEY", "")
+    token = gm.ACTIVE_REQUEST_HEADERS.set({})
+    try:
+        try:
+            gm._require_maps_api_key()
+        except ValueError as exc:
+            assert "x-google-maps-api-key" in str(exc)
+        else:  # pragma: no cover - defensive
+            raise AssertionError("expected missing Maps API key error")
+    finally:
+        gm.ACTIVE_REQUEST_HEADERS.reset(token)
+
+
 def test_health_check_succeeds_with_valid_byok_headers():
     class _DummyCreds:
         valid = True

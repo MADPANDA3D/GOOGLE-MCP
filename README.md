@@ -50,6 +50,13 @@ Required request headers for hosted mode:
    - Google Slides API
    - Gmail API
    - Google Calendar API
+   - YouTube Data API
+   - Google Analytics Data API
+   - Search Console API
+   - Google Business Profile APIs
+   - Content API for Shopping / Merchant Center APIs
+   - AdSense Management API
+   - Google Maps Platform APIs if Maps tools are enabled
 3. Configure the OAuth consent screen.
 4. Create an OAuth client ID (Desktop app) and download `credentials.json`.
 
@@ -64,7 +71,7 @@ fastmcp/.google/credentials.json
 Run this on your local machine (the one with a browser):
 
 ```bash
-export GOOGLE_SCOPES="https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/presentations https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/calendar"
+export GOOGLE_SCOPES="https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/documents https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/presentations https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/analytics.readonly https://www.googleapis.com/auth/webmasters.readonly https://www.googleapis.com/auth/business.manage https://www.googleapis.com/auth/content https://www.googleapis.com/auth/adsense.readonly"
 python fastmcp/google_auth_local.py \
   --credentials fastmcp/.google/credentials.json \
   --token fastmcp/.google/token.json \
@@ -100,6 +107,8 @@ MCP_DISABLE_DEFAULT_GOOGLE_FALLBACK=true
 MCP_GOOGLE_CLIENT_ID_HEADER=x-google-client-id
 MCP_GOOGLE_CLIENT_SECRET_HEADER=x-google-client-secret
 MCP_GOOGLE_REFRESH_TOKEN_HEADER=x-google-refresh-token
+MCP_GOOGLE_MAPS_API_KEY_HEADER=x-google-maps-api-key
+GOOGLE_MAPS_API_KEY=
 MCP_BYOK_CLIENT_CACHE_SIZE=256
 MCP_BYOK_CLIENT_CACHE_TTL_SECONDS=900
 ```
@@ -109,12 +118,13 @@ If you add or change scopes later, rerun `google_auth_local.py` and copy the new
 
 ### 4) Run the server
 
+If Python dependencies are already installed on the host, run:
+
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install -r fastmcp/requirements.txt
 python3 fastmcp/google_mcp_server.py
 ```
+
+For clean local verification without a persistent venv, use Docker as shown below.
 
 Or with Docker:
 
@@ -158,65 +168,18 @@ Then create the virtual environment as shown above.
 
 ## Tools (curated)
 
+The live catalog is intentionally large. Start with:
+
 - `google_mcp_welcome`
 - `google_mcp_list_capabilities`
 - `google_mcp_get_endpoint_coverage`
 - `google_mcp_get_tool_usage`
-- `drive_list_files`
-- `drive_search_files`
-- `drive_batch_get_metadata`
-- `drive_get_file`
-- `drive_create_folder`
-- `drive_upload_file`
-- `drive_download_file`
-- `drive_empty_trash`
-- `drive_delete_file`
-- `drive_purge_trash`
-- `docs_create_document`
-- `docs_get_document`
-- `docs_insert_text`
-- `docs_replace_text`
-- `sheets_create_spreadsheet`
-- `sheets_get_spreadsheet`
-- `sheets_get_values`
-- `sheets_batch_get_values`
-- `sheets_update_values`
-- `slides_create_presentation`
-- `slides_get_presentation`
-- `slides_replace_text`
-- `gmail_list_labels`
-- `gmail_create_label`
-- `gmail_delete_label`
-- `gmail_list_messages`
-- `gmail_search_messages`
-- `gmail_get_message`
-- `gmail_get_message_headers`
-- `gmail_get_message_body`
-- `gmail_batch_get_metadata`
-- `gmail_list_threads`
-- `gmail_get_thread`
-- `gmail_send_message`
-- `gmail_send_raw_message`
-- `gmail_create_draft`
-- `gmail_send_draft`
-- `gmail_modify_message_labels`
-- `gmail_trash_message`
-- `gmail_untrash_message`
-- `gmail_delete_message`
-- `calendar_list_calendars`
-- `calendar_get_calendar`
-- `calendar_create_calendar`
-- `calendar_delete_calendar`
-- `calendar_list_events`
-- `calendar_search_events`
-- `calendar_batch_get_events`
-- `calendar_get_event`
-- `calendar_create_event`
-- `calendar_update_event`
-- `calendar_delete_event`
-- `calendar_quick_add`
-- `google_raw_request` (advanced/debug passthrough; see below)
 - `mcp_health_check`
+
+Provider categories include Drive, Docs, Sheets, Slides, Gmail, Calendar,
+YouTube, Analytics, Search Console, Google Business Profile, Maps Platform,
+Merchant/Shopping, and AdSense. Use the navigation tools instead of dumping the
+raw catalog into an agent context.
 
 ## Agent navigation
 
@@ -246,6 +209,10 @@ Agents should prefer `meta.next_page_token` for paging; `data.nextPageToken` rem
 - Use `fields` for Docs/Sheets/Slides to keep payloads small.
 - Prefer `drive_download_file(return_mode="url")` unless you explicitly need file bytes.
 - Use Gmail metadata tools unless you need raw MIME.
+- For large inbox cleanup, start with `gmail_mailbox_overview`, then
+  `gmail_sender_clusters`, then `gmail_cleanup_plan`. Apply changes only with
+  `gmail_apply_cleanup_plan(dry_run=false, confirm=true)` after reviewing the
+  batch summary.
 - Call `mcp_health_check(run_checks=true, warm_all=true)` after restarts.
 - Keep `MCP_WORKERS=1` if you want caching to persist across calls.
 - `gmail_list_labels` defaults to minimal output; set `include_visibility=true` or `fields` for full label data.
@@ -261,6 +228,23 @@ params: {"pageSize": 10}
 ```
 
 Note: `google_raw_request` is powerful but easy to misuse. Prefer the curated tools unless you need a specific endpoint. If you enable `MCP_RAW_STRICT=true`, requests must target a Google API host (or use a relative path); invalid hosts are rejected with a clear error.
+
+## Live certification harness
+
+Read-only certification:
+
+```bash
+python3 fastmcp/live_workspace_certification.py --env-file fastmcp/.env
+```
+
+Disposable Workspace write certification:
+
+```bash
+python3 fastmcp/live_workspace_certification.py --env-file fastmcp/.env --include-writes
+```
+
+Email sends are never automatic. To test sending, first run the disposable write
+flow and pass an explicit recipient with `--send-test-to`.
 
 ## Notes
 

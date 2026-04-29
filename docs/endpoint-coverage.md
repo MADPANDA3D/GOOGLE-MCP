@@ -12,6 +12,13 @@ Official source set consulted during this audit:
 - Google Slides API v1 REST reference and discovery document: <https://developers.google.com/workspace/slides/api/reference/rest>, <https://slides.googleapis.com/$discovery/rest?version=v1>
 - Gmail API v1 REST reference and discovery document: <https://developers.google.com/gmail/api/reference/rest>, <https://gmail.googleapis.com/$discovery/rest?version=v1>
 - Google Calendar API v3 REST reference and discovery document: <https://developers.google.com/workspace/calendar/api/v3/reference>, <https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest>
+- YouTube Data API v3 reference and discovery document: <https://developers.google.com/youtube/v3/docs>, <https://youtube.googleapis.com/$discovery/rest?version=v3>
+- Google Analytics Data API reference and discovery document: <https://developers.google.com/analytics/devguides/reporting/data/v1>, <https://analyticsdata.googleapis.com/$discovery/rest?version=v1beta>
+- Search Console API reference and discovery document: <https://developers.google.com/webmaster-tools/v1>, <https://searchconsole.googleapis.com/$discovery/rest?version=v1>
+- Google Business Profile APIs: <https://developers.google.com/my-business>
+- Google Maps Platform APIs: <https://developers.google.com/maps/documentation>
+- Content API for Shopping / Merchant API docs: <https://developers.google.com/shopping-content>, <https://developers.google.com/merchant/api>
+- AdSense Management API docs: <https://developers.google.com/adsense/management>
 
 Legend:
 
@@ -25,12 +32,18 @@ Legend:
 
 | API | Discovery methods | Curated status | Notes |
 |---|---:|---|---|
-| Drive v3 | 58 | partial | Core file list/get/create/upload/download/delete covered. Permissions, comments, shared drives, changes, revisions, labels, watches, and app/about resources remain uncovered as curated tools. |
+| Drive v3 | 58 | partial | Core file list/get/create/upload/download/delete covered. Added about, permissions, comments, revisions, shared drives, copy, and metadata update wrappers. Changes, labels, watches, replies, and app resources remain partial/missing. |
 | Docs v1 | 3 | partial | Documents create/get covered. `documents.batchUpdate` is covered for insert and replace text only, not every request type. |
-| Sheets v4 | 17 | partial | Spreadsheet create/get and values get/batchGet/update covered. Append, clear, batch update, data filters, metadata, and sheet copy are missing. |
-| Slides v1 | 5 | partial | Presentation create/get and text replacement through batchUpdate covered. Page get and thumbnail endpoints are missing. |
-| Gmail v1 | 79 | partial | Labels/messages/threads/drafts common workflows covered. Settings, history, CSE, forwarding, delegates, send-as, filters, attachment get, batch operations, and watches remain uncovered or blocked by scope/safety. |
-| Calendar v3 | 37 | partial | Calendars, calendar list, and event list/get/create/patch/delete/quickAdd covered. ACL, freebusy, settings, colors, watches, channels, event move/import/instances/update, and CalendarList mutation are missing or intentionally excluded. |
+| Sheets v4 | 17 | partial | Spreadsheet create/get, values get/batchGet/update/append/clear/batchUpdate/batchClear, data-filter get, and spreadsheet batchUpdate covered. Developer metadata and sheet copy remain missing. |
+| Slides v1 | 5 | partial | Presentation create/get, text replacement, generic batchUpdate, page get, and page thumbnail covered. |
+| Gmail v1 | 79 | partial | Labels/messages/threads/drafts common workflows plus inbox-scale overview/clustering/plans, batch modify/delete, attachments, thread mutation, draft management, and history are covered. Settings, CSE, forwarding, delegates, send-as, filters, and watches remain blocked or intentionally excluded. |
+| Calendar v3 | 37 | partial | Calendars, calendar list, events, freebusy, colors, settings, ACL, event instances/move/import/full update, and CalendarList updates covered. Watch/channel lifecycle remains excluded until callback infrastructure exists. |
+| YouTube Data v3 | 86 | partial | Search, channels, videos, playlists, playlist items, and comment threads covered. Uploads and mutations remain gated. |
+| Analytics Data v1beta | 11 | partial | Metadata, runReport, batchRunReports, and realtime reports covered. Pivot/audience export endpoints remain missing. |
+| Search Console v1 | 11 | partial | Sites list, Search Analytics query, URL inspection, and sitemap list covered. Mutations are intentionally excluded by default. |
+| Business Profile APIs | 37+ | partial | Accounts, locations, location get, and performance daily metrics covered. Verification, notifications, Q&A, place actions, and location mutation are gated or missing. |
+| Maps Platform | varies | partial | Geocoding, reverse geocoding, Places text search/details, and Routes compute covered. Requires Maps API key and usage-cost controls. |
+| Merchant/Shopping + AdSense | 158+ | partial/blocked | Merchant product list/get and AdSense account/report read tools covered. Merchant mutations and Google Ads are blocked pending account prerequisites and approval gates. |
 
 ## Drive API v3
 
@@ -79,11 +92,11 @@ Legend:
 |---|---|---|---|---|
 | `users` | `getProfile`, `watch`, `stop` | partial | `mcp_health_check` uses `getProfile` internally | Watch/stop require Pub/Sub/channel lifecycle and are intentionally excluded until callback infrastructure exists. |
 | `users.labels` | `create`, `list`, `patch`, `update`, `delete`, `get` | partial | `gmail_list_labels`, `gmail_create_label`, `gmail_delete_label` | `get`, `patch`, and `update` are missing. |
-| `users.messages` | `delete`, `get`, `send`, `batchDelete`, `modify`, `import`, `trash`, `batchModify`, `untrash`, `insert`, `list` | partial | `gmail_list_messages`, `gmail_search_messages`, `gmail_get_message`, `gmail_get_message_headers`, `gmail_get_message_body`, `gmail_batch_get_metadata`, `gmail_send_message`, `gmail_send_raw_message`, `gmail_modify_message_labels`, `gmail_trash_message`, `gmail_untrash_message`, `gmail_delete_message` | Batch delete/modify, import, and insert are missing. Sends require explicit user approval in live tests. |
-| `users.messages.attachments` | `get` | missing | `google_raw_request` only | Add a bounded attachment download wrapper before exposing by default. |
-| `users.threads` | `delete`, `get`, `trash`, `untrash`, `modify`, `list` | partial | `gmail_list_threads`, `gmail_get_thread` | Thread mutation/delete/trash/untrash are missing and require confirmation semantics. |
-| `users.drafts` | `send`, `delete`, `get`, `create`, `list`, `update` | partial | `gmail_create_draft`, `gmail_send_draft` | Draft list/get/update/delete are missing. |
-| `users.history` | `list` | blocked_scope | `google_raw_request` only | Requires history workflow design and startHistoryId management. |
+| `users.messages` | `delete`, `get`, `send`, `batchDelete`, `modify`, `import`, `trash`, `batchModify`, `untrash`, `insert`, `list` | partial | `gmail_list_messages`, `gmail_search_messages`, `gmail_get_message`, `gmail_get_message_headers`, `gmail_get_message_body`, `gmail_batch_get_metadata`, `gmail_send_message`, `gmail_send_raw_message`, `gmail_modify_message_labels`, `gmail_batch_modify_messages`, `gmail_batch_delete_messages`, `gmail_trash_message`, `gmail_untrash_message`, `gmail_delete_message` | Import and insert remain missing. Sends require explicit user approval in live tests. |
+| `users.messages.attachments` | `get` | implemented | `gmail_get_attachment` | Bounded content return with max byte guard. |
+| `users.threads` | `delete`, `get`, `trash`, `untrash`, `modify`, `list` | implemented | `gmail_list_threads`, `gmail_get_thread`, `gmail_modify_thread_labels`, `gmail_trash_thread`, `gmail_untrash_thread`, `gmail_delete_thread` | Destructive thread operations require confirmation. |
+| `users.drafts` | `send`, `delete`, `get`, `create`, `list`, `update` | implemented | `gmail_create_draft`, `gmail_send_draft`, `gmail_list_drafts`, `gmail_get_draft`, `gmail_update_draft`, `gmail_delete_draft` | Send still requires explicit approval. |
+| `users.history` | `list` | implemented | `gmail_list_history` | Requires caller-provided `start_history_id`. |
 | `users.settings` | `updateLanguage`, `getAutoForwarding`, `getVacation`, `getLanguage`, `updateAutoForwarding`, `getPop`, `updateImap`, `updatePop`, `updateVacation`, `getImap` | blocked_scope | `google_raw_request` only | Provider settings changes require explicit approval and additional Gmail settings scopes. |
 | `users.settings.filters` | `list`, `create`, `get`, `delete` | blocked_scope | `google_raw_request` only | Mail automation mutations are intentionally excluded until scoped and gated. |
 | `users.settings.forwardingAddresses` | `get`, `delete`, `list`, `create` | blocked_scope | `google_raw_request` only | Forwarding setup is high-risk and can require verification. |
@@ -105,3 +118,16 @@ Legend:
 | `settings` | `watch`, `get`, `list` | missing | `google_raw_request` only | Read-only settings wrappers can be added; watch requires callback lifecycle. |
 | `colors` | `get` | missing | `google_raw_request` only | Low-risk read-only wrapper candidate. |
 | `channels` | `stop` | intentionally_excluded | `google_raw_request` only | Channel stop needs tracked watch/channel creation first. |
+
+## Business API Expansion
+
+| API | Resource | Status | Curated MCP coverage | Notes |
+|---|---|---|---|---|
+| YouTube Data v3 | `search`, `channels`, `videos`, `playlists`, `playlistItems`, `commentThreads` | partial | `youtube_search`, `youtube_list_channels`, `youtube_list_videos`, `youtube_list_playlists`, `youtube_list_playlist_items`, `youtube_list_comment_threads` | Uploads, captions mutation, comment moderation, subscriptions, and channel updates are not default agent tools. |
+| Analytics Data v1beta | `properties` reports | partial | `analytics_get_metadata`, `analytics_run_report`, `analytics_batch_run_reports`, `analytics_run_realtime_report` | Pivot reports, compatibility checks, and audience exports remain missing. |
+| Search Console v1 | Sites, sitemaps, Search Analytics, URL Inspection | partial | `searchconsole_list_sites`, `searchconsole_list_sitemaps`, `searchconsole_query_search_analytics`, `searchconsole_inspect_url` | Site/sitemap mutations are intentionally excluded by default. |
+| Google Business Profile | Account Management, Business Information, Performance | partial | `business_profile_list_accounts`, `business_profile_list_locations`, `business_profile_get_location`, `business_profile_fetch_performance` | Requires `business.manage`; profile mutations, verification, Q&A, notifications, and place actions need additional approval gates. |
+| Maps Platform | Geocoding, Places, Routes | partial | `maps_geocode`, `maps_reverse_geocode`, `maps_place_text_search`, `maps_place_details`, `maps_compute_routes` | Requires `x-google-maps-api-key` or `GOOGLE_MAPS_API_KEY`; billing-impacting tests need explicit approval. |
+| Merchant/Shopping | Content API products | partial | `merchant_list_products`, `merchant_get_product` | Product mutations remain blocked pending account-specific approval. |
+| AdSense | Accounts and reports | partial | `adsense_list_accounts`, `adsense_generate_report` | Read-only reporting only. |
+| Google Ads | Campaign/customer reporting and mutation | blocked_scope | None | Requires developer token, login customer ID, and a dedicated approval model before exposing curated tools. |
