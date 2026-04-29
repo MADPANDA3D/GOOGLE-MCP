@@ -213,6 +213,16 @@ def test_chunked_uses_provider_sized_batches():
     assert [len(chunk) for chunk in chunks] == [1000, 1000, 501]
 
 
+def test_scope_list_normalizes_strings_and_sequences():
+    assert gm._scope_list("scope.one, scope.two scope.three") == [
+        "scope.one",
+        "scope.two",
+        "scope.three",
+    ]
+    assert gm._scope_list(("scope.one", "scope.two")) == ["scope.one", "scope.two"]
+    assert gm._scope_list(None) == []
+
+
 def test_maps_api_key_requires_header_or_env(monkeypatch):
     monkeypatch.setattr(gm, "GOOGLE_MAPS_API_KEY", "")
     token = gm.ACTIVE_REQUEST_HEADERS.set({})
@@ -225,6 +235,76 @@ def test_maps_api_key_requires_header_or_env(monkeypatch):
             raise AssertionError("expected missing Maps API key error")
     finally:
         gm.ACTIVE_REQUEST_HEADERS.reset(token)
+
+
+def test_byok_refresh_uses_existing_grant_scopes(monkeypatch):
+    calls = {}
+
+    class _FakeCreds:
+        valid = True
+
+        @classmethod
+        def from_authorized_user_info(cls, info, scopes=None):
+            calls["scopes"] = scopes
+            return cls()
+
+    monkeypatch.setattr(gm, "Credentials", _FakeCreds)
+    workspace = gm.GoogleWorkspaceClient(
+        credentials_path=None,
+        token_path=None,
+        scopes=["https://www.googleapis.com/auth/youtube.readonly"],
+        authorized_user_info={
+            "client_id": "cid",
+            "client_secret": "csecret",
+            "refresh_token": "rtok",
+            "token_uri": gm.GOOGLE_TOKEN_URI,
+            "type": "authorized_user",
+        },
+        persist_token=False,
+    )
+
+    workspace._load_credentials()
+
+    assert calls["scopes"] is None
+
+
+def test_token_file_refresh_uses_existing_grant_scopes(monkeypatch, tmp_path):
+    calls = {}
+    token_path = tmp_path / "token.json"
+    token_path.write_text(
+        json.dumps(
+            {
+                "client_id": "cid",
+                "client_secret": "csecret",
+                "refresh_token": "rtok",
+                "token_uri": gm.GOOGLE_TOKEN_URI,
+                "type": "authorized_user",
+                "scopes": ["https://www.googleapis.com/auth/gmail.modify"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _FakeCreds:
+        valid = True
+
+        @classmethod
+        def from_authorized_user_file(cls, filename, scopes=None):
+            calls["filename"] = filename
+            calls["scopes"] = scopes
+            return cls()
+
+    monkeypatch.setattr(gm, "Credentials", _FakeCreds)
+    workspace = gm.GoogleWorkspaceClient(
+        credentials_path=None,
+        token_path=str(token_path),
+        scopes=["https://www.googleapis.com/auth/youtube.readonly"],
+    )
+
+    workspace._load_credentials()
+
+    assert calls["filename"] == str(token_path)
+    assert calls["scopes"] is None
 
 
 def test_health_check_succeeds_with_valid_byok_headers():

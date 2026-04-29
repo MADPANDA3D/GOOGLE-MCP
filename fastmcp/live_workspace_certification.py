@@ -19,32 +19,54 @@ from pathlib import Path
 from typing import Any
 
 
-def load_env_file(path: str) -> None:
+def load_env_file(path: str) -> Path | None:
     env_path = Path(path)
     if not env_path.exists():
-        return
+        return None
     for line in env_path.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
         key, value = stripped.split("=", 1)
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+    return env_path.parent
 
 
-def load_google_oauth_values() -> tuple[str, str, str]:
+def _path_candidates(configured: str, env_dir: Path | None) -> list[Path]:
+    raw = Path(configured)
+    candidates = [raw]
+    if not raw.is_absolute():
+        candidates.append(Path.cwd() / raw)
+        if env_dir:
+            candidates.append(env_dir / raw)
+    elif env_dir and str(raw).startswith("/app/"):
+        candidates.append(env_dir / raw.relative_to("/app"))
+    return candidates
+
+
+def _first_existing_path(configured: str, env_dir: Path | None) -> Path | None:
+    for candidate in _path_candidates(configured, env_dir):
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def load_google_oauth_values(env_dir: Path | None = None) -> tuple[str, str, str]:
     client_id = os.getenv("GOOGLE_CLIENT_ID") or os.getenv("X_GOOGLE_CLIENT_ID", "")
     client_secret = os.getenv("GOOGLE_CLIENT_SECRET") or os.getenv("X_GOOGLE_CLIENT_SECRET", "")
     refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN") or os.getenv("X_GOOGLE_REFRESH_TOKEN", "")
-    credentials_path = Path(os.getenv("GOOGLE_CREDENTIALS_PATH", "fastmcp/.google/credentials.json"))
-    token_path = Path(os.getenv("GOOGLE_TOKEN_PATH", "fastmcp/.google/token.json"))
-    if credentials_path.exists() and (not client_id or not client_secret):
+    credentials_path = _first_existing_path(
+        os.getenv("GOOGLE_CREDENTIALS_PATH", "fastmcp/.google/credentials.json"), env_dir
+    )
+    token_path = _first_existing_path(os.getenv("GOOGLE_TOKEN_PATH", "fastmcp/.google/token.json"), env_dir)
+    if credentials_path and (not client_id or not client_secret):
         credentials = json.loads(credentials_path.read_text(encoding="utf-8"))
         installed = credentials.get("installed") or credentials.get("web") or {}
         client_id = client_id or installed.get("client_id", "")
         client_secret = client_secret or installed.get("client_secret", "")
-    if token_path.exists() and not refresh_token:
+    if token_path:
         token = json.loads(token_path.read_text(encoding="utf-8"))
-        refresh_token = token.get("refresh_token", "")
+        refresh_token = refresh_token or token.get("refresh_token", "")
         client_id = client_id or token.get("client_id", "")
         client_secret = client_secret or token.get("client_secret", "")
     return client_id, client_secret, refresh_token
@@ -122,9 +144,9 @@ def main() -> int:
     parser.add_argument("--report", default="")
     args = parser.parse_args()
 
-    load_env_file(args.env_file)
+    env_dir = load_env_file(args.env_file)
     grant = os.getenv("MCP_PORTAL_GRANT_TOKEN") or os.getenv("GOOGLE_MCP_PORTAL_GRANT", "")
-    client_id, client_secret, refresh_token = load_google_oauth_values()
+    client_id, client_secret, refresh_token = load_google_oauth_values(env_dir)
     if not all((grant, client_id, client_secret, refresh_token)):
         print(
             "Missing MCP_PORTAL_GRANT_TOKEN plus GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET/GOOGLE_REFRESH_TOKEN.",
@@ -149,6 +171,7 @@ def main() -> int:
     created_event_id = ""
     created_label_id = ""
     created_draft_id = ""
+    created_resources: list[dict[str, str]] = []
 
     for name, tool, arguments in [
         ("welcome", "google_mcp_welcome", {}),
@@ -174,6 +197,7 @@ def main() -> int:
         record(results, "docs_create_document", doc)
         doc_id = doc.get("raw", {}).get("tool_result", {}).get("data", {}).get("documentId", "")
         if doc_id:
+            created_resources.append({"kind": "document", "id": doc_id})
             created_drive_ids.append(doc_id)
             record(results, "docs_get_document", client.call("docs_get_document", {"documentId": doc_id}))
 
@@ -181,6 +205,7 @@ def main() -> int:
         record(results, "sheets_create_spreadsheet", sheet)
         sheet_id = sheet.get("raw", {}).get("tool_result", {}).get("data", {}).get("spreadsheetId", "")
         if sheet_id:
+            created_resources.append({"kind": "spreadsheet", "id": sheet_id})
             created_drive_ids.append(sheet_id)
             record(
                 results,
@@ -195,12 +220,15 @@ def main() -> int:
         record(results, "slides_create_presentation", slide)
         slide_id = slide.get("raw", {}).get("tool_result", {}).get("data", {}).get("presentationId", "")
         if slide_id:
+            created_resources.append({"kind": "presentation", "id": slide_id})
             created_drive_ids.append(slide_id)
             record(results, "slides_get_presentation", client.call("slides_get_presentation", {"presentationId": slide_id}))
 
         label = client.call("gmail_create_label", {"name": f"{prefix}_label"})
         record(results, "gmail_create_label", label)
         created_label_id = label.get("raw", {}).get("tool_result", {}).get("data", {}).get("id", "")
+        if created_label_id:
+            created_resources.append({"kind": "gmail_label", "id": created_label_id})
 
         draft = client.call(
             "gmail_create_draft",
@@ -208,6 +236,8 @@ def main() -> int:
         )
         record(results, "gmail_create_draft", draft)
         created_draft_id = draft.get("raw", {}).get("tool_result", {}).get("data", {}).get("id", "")
+        if created_draft_id:
+            created_resources.append({"kind": "gmail_draft", "id": created_draft_id})
 
         start = datetime.now(UTC) + timedelta(days=30)
         end = start + timedelta(minutes=15)
@@ -215,6 +245,7 @@ def main() -> int:
         record(results, "calendar_create_calendar", cal)
         created_calendar_id = cal.get("raw", {}).get("tool_result", {}).get("data", {}).get("id", "")
         if created_calendar_id:
+            created_resources.append({"kind": "calendar", "id": created_calendar_id})
             event = client.call(
                 "calendar_create_event",
                 {
@@ -227,6 +258,8 @@ def main() -> int:
             )
             record(results, "calendar_create_event", event)
             created_event_id = event.get("raw", {}).get("tool_result", {}).get("data", {}).get("id", "")
+            if created_event_id:
+                created_resources.append({"kind": "calendar_event", "id": created_event_id})
 
     if args.send_test_to and created_draft_id:
         record(results, "gmail_send_draft", client.call("gmail_send_draft", {"draftId": created_draft_id}))
@@ -254,6 +287,14 @@ def main() -> int:
         "prefix": prefix,
         "include_writes": args.include_writes,
         "send_test": bool(args.send_test_to),
+        "created_resources": created_resources,
+        "cleanup": {
+            "calendar_deleted": bool(created_calendar_id),
+            "draft_deleted": bool(created_draft_id and not args.send_test_to),
+            "drive_files_deleted": len(created_drive_ids),
+            "event_deleted": bool(created_event_id),
+            "label_deleted": bool(created_label_id),
+        },
         "results": results,
     }
     text = json.dumps(report, indent=2, sort_keys=True)

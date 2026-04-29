@@ -1,0 +1,153 @@
+{
+  "cleanup": {
+    "calendar_deleted": true,
+    "draft_deleted": true,
+    "drive_files_deleted": 3,
+    "event_deleted": true,
+    "label_deleted": true
+  },
+  "created_resources": [
+    {
+      "id": "1WTcnBLq0SRrVFJNEPOWGxwzten_bc5bCgcTCehr4448",
+      "kind": "document"
+    },
+    {
+      "id": "15Ls_jwsc5dmreDu8YX6ldRK-erRH_P1yvZD3J-oTS24",
+      "kind": "spreadsheet"
+    },
+    {
+      "id": "1kGPKGHqyTn_WZu_jLGt9WtUSnRQ50r_5NP-NVYQ8j3I",
+      "kind": "presentation"
+    },
+    {
+      "id": "Label_8",
+      "kind": "gmail_label"
+    },
+    {
+      "id": "r-1728187594242381342",
+      "kind": "gmail_draft"
+    },
+    {
+      "id": "c_789b5fd2f8593b8f646d72471ce194104ea62eee0a5d89f36bed6a411cec87ac@group.calendar.google.com",
+      "kind": "calendar"
+    },
+    {
+      "id": "b0r9kj6m8mchcbcnob0k9u02ho",
+      "kind": "calendar_event"
+    }
+  ],
+  "include_writes": true,
+  "ok": true,
+  "prefix": "MAD_AUDIT_DELETE_ME_20260429_1777445200",
+  "results": [
+    {
+      "name": "welcome",
+      "status": "passed"
+    },
+    {
+      "name": "capabilities",
+      "status": "passed"
+    },
+    {
+      "name": "health",
+      "status": "passed"
+    },
+    {
+      "name": "gmail_labels",
+      "status": "passed"
+    },
+    {
+      "name": "gmail_overview",
+      "status": "passed"
+    },
+    {
+      "name": "gmail_clusters",
+      "status": "passed"
+    },
+    {
+      "name": "calendar_list",
+      "status": "passed"
+    },
+    {
+      "name": "calendar_events",
+      "status": "passed"
+    },
+    {
+      "name": "drive_list",
+      "status": "passed"
+    },
+    {
+      "name": "raw_guardrail",
+      "status": "passed"
+    },
+    {
+      "name": "docs_create_document",
+      "status": "passed"
+    },
+    {
+      "name": "docs_get_document",
+      "status": "passed"
+    },
+    {
+      "name": "sheets_create_spreadsheet",
+      "status": "passed"
+    },
+    {
+      "name": "sheets_update_values",
+      "status": "passed"
+    },
+    {
+      "name": "slides_create_presentation",
+      "status": "passed"
+    },
+    {
+      "name": "slides_get_presentation",
+      "status": "passed"
+    },
+    {
+      "name": "gmail_create_label",
+      "status": "passed"
+    },
+    {
+      "name": "gmail_create_draft",
+      "status": "passed"
+    },
+    {
+      "name": "calendar_create_calendar",
+      "status": "passed"
+    },
+    {
+      "name": "calendar_create_event",
+      "status": "passed"
+    },
+    {
+      "name": "calendar_delete_event",
+      "status": "passed"
+    },
+    {
+      "name": "calendar_delete_calendar",
+      "status": "passed"
+    },
+    {
+      "name": "gmail_delete_draft",
+      "status": "passed"
+    },
+    {
+      "name": "gmail_delete_label",
+      "status": "passed"
+    },
+    {
+      "name": "drive_delete_file",
+      "status": "passed"
+    },
+    {
+      "name": "drive_delete_file",
+      "status": "passed"
+    },
+    {
+      "name": "drive_delete_file",
+      "status": "passed"
+    }
+  ],
+  "send_test": false
+}

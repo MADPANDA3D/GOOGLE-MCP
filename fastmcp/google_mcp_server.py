@@ -180,6 +180,16 @@ def parse_scopes(raw: str) -> list[str]:
     return [scope.strip() for scope in cleaned.split() if scope.strip()]
 
 
+def _scope_list(value: Any) -> list[str]:
+    if not value:
+        return []
+    if isinstance(value, str):
+        return parse_scopes(value)
+    if isinstance(value, (list, tuple, set)):
+        return [str(scope) for scope in value if str(scope)]
+    return []
+
+
 class GoogleWorkspaceClient:
     def __init__(
         self,
@@ -215,7 +225,6 @@ class GoogleWorkspaceClient:
                 if self.authorized_user_info:
                     self._creds = Credentials.from_authorized_user_info(
                         self.authorized_user_info,
-                        self.scopes,
                     )
                 else:
                     if not self.token_path or not os.path.exists(self.token_path):
@@ -223,7 +232,7 @@ class GoogleWorkspaceClient:
                             "Missing token.json. Run fastmcp/google_auth_local.py locally and copy it to the server."
                         )
                     self._creds = Credentials.from_authorized_user_file(
-                        self.token_path, self.scopes
+                        self.token_path
                     )
             creds = self._creds
             if not creds.valid:
@@ -5507,6 +5516,8 @@ async def mcp_health_check(
         }
         checks: dict[str, Any] = {}
         user_email = ""
+        credential_scopes = _scope_list(getattr(creds, "scopes", None))
+        granted_scopes = _scope_list(getattr(creds, "granted_scopes", None))
 
         def has_scope(fragment: str) -> bool:
             return any(fragment in scope for scope in SCOPES)
@@ -5673,6 +5684,9 @@ async def mcp_health_check(
             "user_email": user_email,
             "token_valid": creds.valid,
             "token_expiry": creds.expiry.isoformat() if creds.expiry else None,
+            "configured_scopes": SCOPES,
+            "credential_scopes": credential_scopes,
+            "granted_scopes": granted_scopes,
             "scopes": SCOPES,
             "cache_before": cache_before,
             "cache_after": cache_after,
