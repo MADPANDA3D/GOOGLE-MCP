@@ -31,6 +31,25 @@ def load_env_file(path: str) -> None:
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
+def load_google_oauth_values() -> tuple[str, str, str]:
+    client_id = os.getenv("GOOGLE_CLIENT_ID") or os.getenv("X_GOOGLE_CLIENT_ID", "")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET") or os.getenv("X_GOOGLE_CLIENT_SECRET", "")
+    refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN") or os.getenv("X_GOOGLE_REFRESH_TOKEN", "")
+    credentials_path = Path(os.getenv("GOOGLE_CREDENTIALS_PATH", "fastmcp/.google/credentials.json"))
+    token_path = Path(os.getenv("GOOGLE_TOKEN_PATH", "fastmcp/.google/token.json"))
+    if credentials_path.exists() and (not client_id or not client_secret):
+        credentials = json.loads(credentials_path.read_text(encoding="utf-8"))
+        installed = credentials.get("installed") or credentials.get("web") or {}
+        client_id = client_id or installed.get("client_id", "")
+        client_secret = client_secret or installed.get("client_secret", "")
+    if token_path.exists() and not refresh_token:
+        token = json.loads(token_path.read_text(encoding="utf-8"))
+        refresh_token = token.get("refresh_token", "")
+        client_id = client_id or token.get("client_id", "")
+        client_secret = client_secret or token.get("client_secret", "")
+    return client_id, client_secret, refresh_token
+
+
 class McpClient:
     def __init__(self, url: str, headers: dict[str, str]):
         self.url = url
@@ -105,9 +124,7 @@ def main() -> int:
 
     load_env_file(args.env_file)
     grant = os.getenv("MCP_PORTAL_GRANT_TOKEN") or os.getenv("GOOGLE_MCP_PORTAL_GRANT", "")
-    client_id = os.getenv("GOOGLE_CLIENT_ID") or os.getenv("X_GOOGLE_CLIENT_ID", "")
-    client_secret = os.getenv("GOOGLE_CLIENT_SECRET") or os.getenv("X_GOOGLE_CLIENT_SECRET", "")
-    refresh_token = os.getenv("GOOGLE_REFRESH_TOKEN") or os.getenv("X_GOOGLE_REFRESH_TOKEN", "")
+    client_id, client_secret, refresh_token = load_google_oauth_values()
     if not all((grant, client_id, client_secret, refresh_token)):
         print(
             "Missing MCP_PORTAL_GRANT_TOKEN plus GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET/GOOGLE_REFRESH_TOKEN.",
