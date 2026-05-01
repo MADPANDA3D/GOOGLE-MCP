@@ -332,6 +332,83 @@ def test_gmail_sender_clusters_obeys_sample_limit(monkeypatch):
     assert cluster["subjects_sample"] == ["Subject 0", "Subject 1"]
 
 
+def test_workspace_create_tools_request_compact_fields(monkeypatch):
+    captured = {}
+
+    class _FakeRequest:
+        def __init__(self, data):
+            self.data = data
+
+        def execute(self):
+            return self.data
+
+    class _DocsDocuments:
+        def create(self, **kwargs):
+            captured["docs"] = kwargs
+            return _FakeRequest({"documentId": "doc-1", "title": "Doc"})
+
+    class _SheetsSpreadsheets:
+        def create(self, **kwargs):
+            captured["sheets"] = kwargs
+            return _FakeRequest(
+                {
+                    "spreadsheetId": "sheet-1",
+                    "spreadsheetUrl": "https://example.test/sheet",
+                    "properties": {"title": "Sheet"},
+                }
+            )
+
+    class _SlidesPresentations:
+        def create(self, **kwargs):
+            captured["slides"] = kwargs
+            return _FakeRequest(
+                {
+                    "presentationId": "slide-1",
+                    "title": "Slides",
+                    "slides": [{"objectId": "p"}],
+                }
+            )
+
+    class _DocsService:
+        def documents(self):
+            return _DocsDocuments()
+
+    class _SheetsService:
+        def spreadsheets(self):
+            return _SheetsSpreadsheets()
+
+    class _SlidesService:
+        def presentations(self):
+            return _SlidesPresentations()
+
+    class _FakeClient:
+        def get_service(self, api_name, api_version):
+            services = {
+                ("docs", "v1"): _DocsService(),
+                ("sheets", "v4"): _SheetsService(),
+                ("slides", "v1"): _SlidesService(),
+            }
+            return services[(api_name, api_version)], False
+
+        def is_session_cached(self):
+            return False
+
+    monkeypatch.setattr(gm, "client", _FakeClient())
+
+    docs_payload = json.loads(asyncio.run(gm.docs_create_document(title="Doc")))
+    sheets_payload = json.loads(asyncio.run(gm.sheets_create_spreadsheet(title="Sheet")))
+    slides_payload = json.loads(asyncio.run(gm.slides_create_presentation(title="Slides")))
+
+    assert docs_payload["data"] == {"documentId": "doc-1", "title": "Doc"}
+    assert captured["docs"]["fields"] == "documentId,title"
+    assert "spreadsheetId" in captured["sheets"]["fields"]
+    assert "sheets/properties" in captured["sheets"]["fields"]
+    assert "presentationId" in captured["slides"]["fields"]
+    assert "slides/objectId" in captured["slides"]["fields"]
+    assert sheets_payload["data"]["spreadsheetId"] == "sheet-1"
+    assert slides_payload["data"]["presentationId"] == "slide-1"
+
+
 def test_chunked_uses_provider_sized_batches():
     chunks = gm._chunked(list(range(2501)), 1000)
     assert [len(chunk) for chunk in chunks] == [1000, 1000, 501]

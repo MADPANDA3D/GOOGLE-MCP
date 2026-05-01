@@ -2660,7 +2660,10 @@ async def docs_create_document(title: str) -> str:
         if not title:
             raise ValueError("title cannot be empty")
         service, cached = client.get_service("docs", "v1")
-        request = service.documents().create(body={"title": title})
+        request = service.documents().create(
+            body={"title": title},
+            fields="documentId,title",
+        )
         return request.execute(), {"cached_service": cached}
 
     return await run_tool("docs", "create_document", _create_doc, allow_retry=False)
@@ -2774,7 +2777,13 @@ async def sheets_create_spreadsheet(title: str) -> str:
         if not title:
             raise ValueError("title cannot be empty")
         service, cached = client.get_service("sheets", "v4")
-        request = service.spreadsheets().create(body={"properties": {"title": title}})
+        request = service.spreadsheets().create(
+            body={"properties": {"title": title}},
+            fields=(
+                "spreadsheetId,spreadsheetUrl,properties/title,"
+                "sheets/properties(sheetId,title,index,sheetType)"
+            ),
+        )
         return request.execute(), {"cached_service": cached}
 
     return await run_tool("sheets", "create_spreadsheet", _create_sheet, allow_retry=False)
@@ -3048,7 +3057,10 @@ async def slides_create_presentation(title: str) -> str:
         if not title:
             raise ValueError("title cannot be empty")
         service, cached = client.get_service("slides", "v1")
-        request = service.presentations().create(body={"title": title})
+        request = service.presentations().create(
+            body={"title": title},
+            fields="presentationId,title,slides/objectId,pageSize",
+        )
         return request.execute(), {"cached_service": cached}
 
     return await run_tool(
