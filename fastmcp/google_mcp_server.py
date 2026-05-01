@@ -571,12 +571,40 @@ def _retry_after_seconds(headers: dict[str, Any] | None) -> float | None:
         return None
 
 
+class GoogleProviderError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_type: str = "api_error",
+        status: int | None = None,
+        details: Any = None,
+        action: str = "Review the Google API error and adjust the request.",
+        retry_after: float | None = None,
+    ):
+        super().__init__(message)
+        self.error_type = error_type
+        self.status = status
+        self.details = details
+        self.action = action
+        self.retry_after = retry_after
+
+
 def _classify_error(exc: Exception) -> dict[str, Any]:
     if isinstance(exc, (ValueError, FileNotFoundError)):
         return {
             "type": "invalid_params",
             "message": str(exc),
             "action": "Verify inputs and try again.",
+        }
+    if isinstance(exc, GoogleProviderError):
+        return {
+            "type": exc.error_type,
+            "message": str(exc),
+            "status": exc.status,
+            "details": exc.details,
+            "retry_after": exc.retry_after,
+            "action": exc.action,
         }
     if isinstance(exc, RefreshError):
         return {
@@ -640,6 +668,15 @@ def _retry_delay_seconds(exc: Exception, attempt: int) -> float:
     base = MCP_RETRY_BASE_SECONDS * (2 ** max(attempt - 1, 0))
     jitter = random.uniform(0, MCP_RETRY_BASE_SECONDS)
     return min(base + jitter, MCP_RETRY_MAX_SECONDS)
+
+
+def _clip_string(value: Any, max_chars: int = 240) -> str:
+    text = "" if value is None else str(value)
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 3:
+        return text[:max_chars]
+    return text[: max_chars - 3].rstrip() + "..."
 
 
 def _response_payload(
@@ -988,6 +1025,54 @@ def _require_maps_api_key() -> str:
     return api_key
 
 
+def _clean_query_params(params: dict[str, Any] | None) -> dict[str, Any]:
+    return {key: value for key, value in (params or {}).items() if value is not None}
+
+
+def _provider_error(
+    provider: str,
+    payload: dict[str, Any],
+    *,
+    status: int | None = None,
+    message: str = "",
+    retry_after: float | None = None,
+) -> GoogleProviderError:
+    error_payload = payload.get("json", {}).get("error") if isinstance(payload.get("json"), dict) else None
+    provider_status = ""
+    if isinstance(payload.get("json"), dict):
+        provider_status = str(payload["json"].get("status") or "")
+    message = message or str(
+        (error_payload or {}).get("message")
+        or payload.get("text")
+        or f"{provider} request failed"
+    )
+    error_type = "api_error"
+    action = "Review the Google API error and adjust the request."
+    if status in {401, 403} or provider_status in {"REQUEST_DENIED"}:
+        error_type = "auth_error"
+        action = "Verify API key, OAuth scopes, credentials, and API enablement."
+    elif status == 404:
+        error_type = "not_found"
+        action = "Confirm the resource ID exists and is accessible."
+    elif status == 429 or provider_status in {"OVER_QUERY_LIMIT", "OVER_DAILY_LIMIT"}:
+        error_type = "rate_limited"
+        action = "Retry later, reduce request rate, or review provider quota."
+    elif status and status >= 500 or provider_status in {"UNKNOWN_ERROR"}:
+        error_type = "upstream_error"
+        action = "Retry after a short delay."
+    elif provider_status in {"INVALID_REQUEST"}:
+        error_type = "invalid_params"
+        action = "Verify inputs and try again."
+    return GoogleProviderError(
+        message,
+        error_type=error_type,
+        status=status,
+        details=payload,
+        action=action,
+        retry_after=retry_after,
+    )
+
+
 def _maps_request(
     method: str,
     url: str,
@@ -995,11 +1080,23 @@ def _maps_request(
     params: dict[str, Any] | None = None,
     json_body: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
+    api_key_location: str = "header",
 ) -> dict[str, Any]:
     session, _ = client.get_session()
+    api_key = _require_maps_api_key()
+    request_params = _clean_query_params(params)
     request_headers = dict(headers or {})
-    request_headers.setdefault("X-Goog-Api-Key", _require_maps_api_key())
-    response = session.request(method.upper(), url, params=params, json=json_body, headers=request_headers)
+    if api_key_location == "query":
+        request_params.setdefault("key", api_key)
+    else:
+        request_headers.setdefault("X-Goog-Api-Key", api_key)
+    response = session.request(
+        method.upper(),
+        url,
+        params=request_params or None,
+        json=json_body,
+        headers=request_headers,
+    )
     payload: dict[str, Any] = {"status": response.status_code}
     content_type = response.headers.get("content-type", "")
     if "application/json" in content_type:
@@ -1007,7 +1104,23 @@ def _maps_request(
     else:
         payload["text"] = response.text[:20000]
     if not response.ok:
-        raise RuntimeError(f"Maps request failed with status {response.status_code}: {payload}")
+        raise _provider_error(
+            "Maps",
+            payload,
+            status=response.status_code,
+            retry_after=_retry_after_seconds(dict(response.headers or {})),
+        )
+    provider_status = ""
+    if isinstance(payload.get("json"), dict):
+        provider_status = str(payload["json"].get("status") or "")
+    if provider_status and provider_status not in {"OK", "ZERO_RESULTS"}:
+        raise _provider_error(
+            "Maps",
+            payload,
+            status=response.status_code,
+            message=payload["json"].get("error_message")
+            or f"Maps request returned provider status {provider_status}",
+        )
     return payload
 
 
@@ -1027,7 +1140,12 @@ def _google_json_request(
     else:
         payload["text"] = response.text[:20000]
     if not response.ok:
-        raise RuntimeError(f"Google API request failed with status {response.status_code}: {payload}")
+        raise _provider_error(
+            "Google API",
+            payload,
+            status=response.status_code,
+            retry_after=_retry_after_seconds(dict(response.headers or {})),
+        )
     return payload
 
 
@@ -5022,15 +5140,93 @@ async def analytics_run_realtime_report(property_id: str, report_request: dict[s
     )
 
 
+def _compact_analytics_metadata(
+    metadata: dict[str, Any],
+    *,
+    max_items_per_kind: int,
+    query: str = "",
+    category: str = "",
+) -> dict[str, Any]:
+    limit = _clamp_int(max_items_per_kind, minimum=1, maximum=200)
+    query_text = query.strip().lower()
+    category_text = category.strip().lower()
+
+    def _matches(item: dict[str, Any]) -> bool:
+        if category_text and category_text not in str(item.get("category", "")).lower():
+            return False
+        if not query_text:
+            return True
+        haystack = " ".join(
+            str(item.get(key, ""))
+            for key in ("apiName", "uiName", "description", "category", "type")
+        ).lower()
+        return query_text in haystack
+
+    def _summarize(items: list[dict[str, Any]]) -> dict[str, Any]:
+        filtered = [item for item in items if _matches(item)]
+        compact_items = [
+            {
+                "apiName": item.get("apiName"),
+                "uiName": item.get("uiName"),
+                "category": item.get("category"),
+                "type": item.get("type"),
+                "description": _clip_string(item.get("description"), 220),
+                **(
+                    {"deprecatedApiNames": item.get("deprecatedApiNames")}
+                    if item.get("deprecatedApiNames")
+                    else {}
+                ),
+            }
+            for item in filtered[:limit]
+        ]
+        return {
+            "total": len(items),
+            "matched": len(filtered),
+            "returned": len(compact_items),
+            "items": compact_items,
+        }
+
+    dimensions = metadata.get("dimensions", []) or []
+    metrics = metadata.get("metrics", []) or []
+    return {
+        "name": metadata.get("name"),
+        "filters": {
+            "query": query,
+            "category": category,
+            "max_items_per_kind": limit,
+        },
+        "dimensions": _summarize(dimensions),
+        "metrics": _summarize(metrics),
+    }
+
+
 @mcp.tool()
-async def analytics_get_metadata(property_id: str) -> str:
-    """Get Google Analytics Data API metadata for a property."""
+async def analytics_get_metadata(
+    property_id: str,
+    max_items_per_kind: int = 25,
+    query: str = "",
+    category: str = "",
+    include_full: bool = False,
+) -> str:
+    """Get compact Google Analytics Data API metadata for a property."""
 
     def _get_metadata():
         if not property_id:
             raise ValueError("property_id cannot be empty")
         url = f"https://analyticsdata.googleapis.com/v1beta/properties/{property_id}/metadata"
-        return _google_json_request("GET", url)
+        payload = _google_json_request("GET", url)
+        if include_full:
+            return payload
+        metadata = payload.get("json", {}) if isinstance(payload, dict) else {}
+        return {
+            "status": payload.get("status"),
+            "json": _compact_analytics_metadata(
+                metadata,
+                max_items_per_kind=max_items_per_kind,
+                query=query,
+                category=category,
+            ),
+        }
 
     return await run_tool("analytics", "get_metadata", _get_metadata, allow_retry=True)
 
@@ -5194,6 +5390,7 @@ async def maps_geocode(address: str, language: str = "en", region: str = "") -> 
             "GET",
             "https://maps.googleapis.com/maps/api/geocode/json",
             params={"address": address, "language": language, "region": region or None},
+            api_key_location="query",
         )
 
     return await run_tool("maps", "geocode", _geocode, allow_retry=True)
@@ -5208,6 +5405,7 @@ async def maps_reverse_geocode(lat: float, lng: float, language: str = "en") -> 
             "GET",
             "https://maps.googleapis.com/maps/api/geocode/json",
             params={"latlng": f"{lat},{lng}", "language": language},
+            api_key_location="query",
         )
 
     return await run_tool("maps", "reverse_geocode", _reverse_geocode, allow_retry=True)
@@ -5801,8 +5999,11 @@ EXPANDED_TOOL_DESCRIPTIONS = {
     "gmail_batch_delete_messages": "Use this destructive Gmail tool only for approved permanent batch deletion of explicit message IDs; dry_run defaults to true.",
     "youtube_search": "Use this read-only YouTube Data API tool to search videos, channels, or playlists with compact pagination.",
     "analytics_run_report": "Use this read-only Google Analytics Data API tool to run GA4 reports for an accessible property.",
+    "analytics_get_metadata": "Use this read-only Google Analytics Data API tool to inspect compact dimension/metric metadata. Use include_full only for audit/dev work.",
     "searchconsole_query_search_analytics": "Use this read-only Search Console tool to query website search performance data.",
     "business_profile_fetch_performance": "Use this read-only Google Business Profile tool to fetch daily location performance metrics.",
+    "maps_geocode": "Use this read-only Google Maps Geocoding tool with per-user BYOK. Returns geocoding results or provider status errors.",
+    "maps_reverse_geocode": "Use this read-only Google Maps reverse geocoding tool with per-user BYOK. Returns geocoding results or provider status errors.",
     "maps_place_text_search": "Use this read-only Google Maps Places tool for business/place discovery; requires Maps API key configuration.",
     "maps_compute_routes": "Use this read-only Google Maps Routes tool for route estimates; requires Maps API key and can incur Maps Platform usage.",
 }
@@ -5844,6 +6045,8 @@ def _extend_expanded_google_surface_metadata() -> None:
             "playlist_id": "YouTube playlist ID.",
             "property_id": "Google Analytics property ID without the properties/ prefix.",
             "report_request": "Google Analytics report request body.",
+            "max_items_per_kind": "Maximum Analytics dimensions and metrics to return in compact metadata.",
+            "include_full": "Set true only for audit/dev use to return full Analytics metadata.",
             "site_url": "Search Console site URL or sc-domain property.",
             "inspection_url": "URL to inspect in Search Console.",
             "language_code": "BCP-47 language code for Search Console inspection output.",

@@ -237,6 +237,134 @@ def test_maps_api_key_requires_header_or_env(monkeypatch):
         gm.ACTIVE_REQUEST_HEADERS.reset(token)
 
 
+def test_maps_legacy_requests_put_api_key_in_query(monkeypatch):
+    captured = {}
+
+    class _FakeResponse:
+        status_code = 200
+        ok = True
+        headers = {"content-type": "application/json"}
+        text = ""
+
+        def json(self):
+            return {"status": "OK", "results": []}
+
+    class _FakeSession:
+        def request(self, method, url, *, params=None, json=None, headers=None):
+            captured.update(
+                {
+                    "method": method,
+                    "url": url,
+                    "params": params,
+                    "headers": headers,
+                }
+            )
+            return _FakeResponse()
+
+    class _FakeClient:
+        def get_session(self):
+            return _FakeSession(), False
+
+    monkeypatch.setattr(gm, "client", _FakeClient())
+    monkeypatch.setattr(gm, "GOOGLE_MAPS_API_KEY", "")
+    token = gm.ACTIVE_REQUEST_HEADERS.set({"x-google-maps-api-key": "maps-key"})
+    try:
+        result = gm._maps_request(
+            "GET",
+            "https://maps.googleapis.com/maps/api/geocode/json",
+            params={"address": "New York, NY", "region": None},
+            api_key_location="query",
+        )
+    finally:
+        gm.ACTIVE_REQUEST_HEADERS.reset(token)
+
+    assert result["json"]["status"] == "OK"
+    assert captured["params"] == {"address": "New York, NY", "key": "maps-key"}
+    assert "X-Goog-Api-Key" not in captured["headers"]
+
+
+def test_maps_provider_status_errors_are_classified(monkeypatch):
+    class _FakeResponse:
+        status_code = 200
+        ok = True
+        headers = {"content-type": "application/json"}
+        text = ""
+
+        def json(self):
+            return {"status": "REQUEST_DENIED", "error_message": "bad key"}
+
+    class _FakeSession:
+        def request(self, method, url, *, params=None, json=None, headers=None):
+            return _FakeResponse()
+
+    class _FakeClient:
+        def get_session(self):
+            return _FakeSession(), False
+
+    monkeypatch.setattr(gm, "client", _FakeClient())
+    token = gm.ACTIVE_REQUEST_HEADERS.set({"x-google-maps-api-key": "maps-key"})
+    try:
+        try:
+            gm._maps_request(
+                "GET",
+                "https://maps.googleapis.com/maps/api/geocode/json",
+                api_key_location="query",
+            )
+        except gm.GoogleProviderError as exc:
+            classified = gm._classify_error(exc)
+        else:  # pragma: no cover - defensive
+            raise AssertionError("expected maps provider error")
+    finally:
+        gm.ACTIVE_REQUEST_HEADERS.reset(token)
+
+    assert classified["type"] == "auth_error"
+    assert classified["status"] == 200
+    assert "bad key" in classified["message"]
+
+
+def test_analytics_metadata_is_compacted_by_default():
+    metadata = {
+        "name": "properties/123/metadata",
+        "dimensions": [
+            {
+                "apiName": "city",
+                "uiName": "City",
+                "category": "Geography",
+                "description": "City dimension " * 40,
+            },
+            {
+                "apiName": "browser",
+                "uiName": "Browser",
+                "category": "Platform",
+                "description": "Browser dimension",
+            },
+        ],
+        "metrics": [
+            {
+                "apiName": "activeUsers",
+                "uiName": "Active users",
+                "category": "User",
+                "type": "TYPE_INTEGER",
+                "description": "Active users metric",
+            }
+        ],
+    }
+
+    compact = gm._compact_analytics_metadata(
+        metadata,
+        max_items_per_kind=1,
+        query="city",
+    )
+
+    assert compact["name"] == "properties/123/metadata"
+    assert compact["dimensions"]["total"] == 2
+    assert compact["dimensions"]["matched"] == 1
+    assert compact["dimensions"]["returned"] == 1
+    assert compact["dimensions"]["items"][0]["apiName"] == "city"
+    assert len(compact["dimensions"]["items"][0]["description"]) <= 220
+    assert compact["metrics"]["matched"] == 0
+
+
 def test_byok_refresh_uses_existing_grant_scopes(monkeypatch):
     calls = {}
 
