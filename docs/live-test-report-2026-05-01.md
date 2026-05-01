@@ -62,6 +62,7 @@ Failed / blocked:
 
 - `business_profile_list_accounts`: provider returns 429 quota exhausted with `quota_limit_value: 0` for project `910769267358`.
 - `merchant_list_products`: blocked by missing Merchant Center account ID; `accounts/authinfo` returns HTTP 200 but no account identifiers.
+- `gmail_delete_message`: permanent message deletion returns insufficient scopes. Gmail permanent delete requires the broader `https://mail.google.com/` scope; this was not added during retest because it requires explicit approval and re-consent.
 
 ## Disposable Resources
 
@@ -78,7 +79,7 @@ Created and cleaned:
 Approved internal send:
 
 - Draft `r-6776342189394057534` sent to `madpanda3d@gmail.com`.
-- Sent message `19de142d11edac28` was moved to sender-side trash after verification.
+- Sent message `19de142d11edac28` was moved to sender-side trash after verification. Permanent deletion was attempted only for this disposable sender-side copy and was blocked by missing Gmail full-mail scope.
 
 ## Remaining Blockers
 
@@ -88,7 +89,7 @@ blocked_fixture:
 
 blocked_scope:
 
-- None observed after the 16-scope reconnect for tested Google APIs.
+- Gmail permanent delete tools need `https://mail.google.com/`; current scope pack supports send/modify/trash/archive but not permanent delete.
 
 blocked_approval:
 
