@@ -4059,6 +4059,7 @@ async def gmail_list_history(
 async def gmail_mailbox_overview(
     queries: list[str] | None = None,
     include_labels: bool = True,
+    max_labels: int = 25,
 ) -> str:
     """Return compact Gmail mailbox counts for inbox-cleanup planning."""
 
@@ -4089,13 +4090,22 @@ async def gmail_mailbox_overview(
                 }
             )
         labels = []
+        labels_total = 0
         if include_labels:
             label_data = service.users().labels().list(
                 userId="me",
                 fields="labels(id,name,type)",
             ).execute()
-            labels = label_data.get("labels", []) or []
-        return {"counts": counts, "labels": labels}, {"cached_service": cached}
+            all_labels = label_data.get("labels", []) or []
+            labels_total = len(all_labels)
+            label_limit = _clamp_int(max_labels, minimum=0, maximum=100)
+            labels = all_labels[:label_limit]
+        return {
+            "counts": counts,
+            "labels": labels,
+            "labels_total": labels_total,
+            "labels_returned": len(labels),
+        }, {"cached_service": cached}
 
     return await run_tool("gmail", "mailbox_overview", _overview, allow_retry=True)
 
@@ -4106,11 +4116,13 @@ async def gmail_sender_clusters(
     max_messages: int = 500,
     page_size: int = 100,
     top_n: int = 25,
+    sample_per_cluster: int = 5,
 ) -> str:
     """Cluster Gmail messages by sender/domain/List-ID without fetching bodies."""
 
     def _sender_clusters():
         service, cached = client.get_service("gmail", "v1")
+        sample_limit = _clamp_int(sample_per_cluster, minimum=0, maximum=10)
         stubs, next_token, estimate, pages = _gmail_list_message_ids(
             service,
             query=query,
@@ -4137,10 +4149,10 @@ async def gmail_sender_clusters(
                 },
             )
             cluster["count"] += 1
-            if len(cluster["message_ids_sample"]) < 25:
+            if len(cluster["message_ids_sample"]) < sample_limit:
                 cluster["message_ids_sample"].append(message.get("id"))
             subject = headers.get("subject", "")
-            if subject and len(cluster["subjects_sample"]) < 5:
+            if subject and len(cluster["subjects_sample"]) < sample_limit:
                 cluster["subjects_sample"].append(subject[:160])
             cluster["label_counts"].update(message.get("labelIds", []))
         rows = sorted(clusters.values(), key=lambda item: item["count"], reverse=True)
@@ -4151,6 +4163,7 @@ async def gmail_sender_clusters(
             "sampled_messages": len(metadata),
             "result_size_estimate": estimate,
             "pages_scanned": pages,
+            "sample_per_cluster": sample_limit,
             "next_page_token": next_token or None,
             "clusters": rows[: _clamp_int(top_n, minimum=1, maximum=100)],
         }, {"cached_service": cached}

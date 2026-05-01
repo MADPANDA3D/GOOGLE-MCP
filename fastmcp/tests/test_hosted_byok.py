@@ -208,6 +208,130 @@ def test_gmail_sender_key_prefers_list_id_then_domain():
     assert sender["key"] == "example.org"
 
 
+def test_gmail_mailbox_overview_caps_labels(monkeypatch):
+    class _FakeRequest:
+        def __init__(self, data):
+            self.data = data
+
+        def execute(self):
+            return self.data
+
+    class _FakeMessages:
+        def list(self, **kwargs):
+            return _FakeRequest(
+                {
+                    "resultSizeEstimate": 7,
+                    "messages": [{"id": "m1"}],
+                    "nextPageToken": "next",
+                }
+            )
+
+    class _FakeLabels:
+        def list(self, **kwargs):
+            return _FakeRequest(
+                {
+                    "labels": [
+                        {"id": "A", "name": "A", "type": "user"},
+                        {"id": "B", "name": "B", "type": "user"},
+                        {"id": "C", "name": "C", "type": "user"},
+                    ]
+                }
+            )
+
+    class _FakeUsers:
+        def messages(self):
+            return _FakeMessages()
+
+        def labels(self):
+            return _FakeLabels()
+
+    class _FakeService:
+        def users(self):
+            return _FakeUsers()
+
+    class _FakeClient:
+        def get_service(self, api_name, api_version):
+            assert (api_name, api_version) == ("gmail", "v1")
+            return _FakeService(), False
+
+        def is_session_cached(self):
+            return False
+
+    monkeypatch.setattr(gm, "client", _FakeClient())
+
+    payload = json.loads(
+        asyncio.run(
+            gm.gmail_mailbox_overview(
+                queries=["is:unread"],
+                include_labels=True,
+                max_labels=2,
+            )
+        )
+    )
+
+    assert payload["ok"] is True
+    assert payload["data"]["labels_total"] == 3
+    assert payload["data"]["labels_returned"] == 2
+    assert [label["id"] for label in payload["data"]["labels"]] == ["A", "B"]
+
+
+def test_gmail_sender_clusters_obeys_sample_limit(monkeypatch):
+    class _FakeClient:
+        def get_service(self, api_name, api_version):
+            assert (api_name, api_version) == ("gmail", "v1")
+            return object(), False
+
+        def is_session_cached(self):
+            return False
+
+    metadata = [
+        {
+            "id": f"m{index}",
+            "headers": {
+                "from": "Example Sender <news@example.com>",
+                "subject": f"Subject {index}",
+            },
+            "labelIds": ["UNREAD", "INBOX"],
+        }
+        for index in range(4)
+    ]
+
+    monkeypatch.setattr(gm, "client", _FakeClient())
+    monkeypatch.setattr(
+        gm,
+        "_gmail_list_message_ids",
+        lambda service, query, max_messages, page_size: (
+            [{"id": item["id"]} for item in metadata],
+            None,
+            4,
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        gm,
+        "_gmail_get_metadata_batch",
+        lambda service, message_ids, max_messages: metadata,
+    )
+
+    payload = json.loads(
+        asyncio.run(
+            gm.gmail_sender_clusters(
+                query="is:unread",
+                max_messages=4,
+                top_n=1,
+                sample_per_cluster=2,
+            )
+        )
+    )
+
+    cluster = payload["data"]["clusters"][0]
+    assert payload["ok"] is True
+    assert payload["data"]["sample_per_cluster"] == 2
+    assert cluster["count"] == 4
+    assert cluster["message_ids_sample"] == ["m0", "m1"]
+    assert cluster["subjects_sample"] == ["Subject 0", "Subject 1"]
+
+
 def test_chunked_uses_provider_sized_batches():
     chunks = gm._chunked(list(range(2501)), 1000)
     assert [len(chunk) for chunk in chunks] == [1000, 1000, 501]
