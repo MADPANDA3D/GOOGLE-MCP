@@ -461,12 +461,12 @@ def test_drive_upload_file_resumable_mode_starts_metadata_only_session(monkeypat
         ok = True
         headers = {
             "Location": "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=session-1",
-            "content-type": "",
+            "content-type": "application/json; charset=UTF-8",
         }
         text = ""
 
         def json(self):
-            return {}
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
 
     class _FakeSession:
         def post(self, url, *, params=None, json=None, headers=None):

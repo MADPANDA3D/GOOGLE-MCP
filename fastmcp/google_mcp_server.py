@@ -2275,7 +2275,12 @@ async def drive_upload_file(
             }
             content_type = response.headers.get("content-type", "")
             if "application/json" in content_type:
-                payload["json"] = response.json()
+                body_text = getattr(response, "text", "")
+                body_content = getattr(response, "content", b"")
+                if body_content or (isinstance(body_text, str) and body_text.strip()):
+                    payload["json"] = response.json()
+                else:
+                    payload["body_empty"] = True
             elif getattr(response, "text", ""):
                 payload["text"] = response.text[:20000]
             if not response.ok:
