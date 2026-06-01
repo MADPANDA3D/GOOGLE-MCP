@@ -409,6 +409,121 @@ def test_workspace_create_tools_request_compact_fields(monkeypatch):
     assert slides_payload["data"]["presentationId"] == "slide-1"
 
 
+def test_drive_upload_file_direct_mode_uses_compact_fields(monkeypatch):
+    captured = {}
+
+    class _FakeRequest:
+        def execute(self):
+            return {"id": "file-1", "name": "tiny.txt", "mimeType": "text/plain"}
+
+    class _FakeFiles:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return _FakeRequest()
+
+    class _FakeDriveService:
+        def files(self):
+            return _FakeFiles()
+
+    class _FakeClient:
+        def get_service(self, api_name, api_version):
+            assert (api_name, api_version) == ("drive", "v3")
+            return _FakeDriveService(), False
+
+        def is_session_cached(self):
+            return False
+
+    monkeypatch.setattr(gm, "client", _FakeClient())
+
+    payload = json.loads(
+        asyncio.run(
+            gm.drive_upload_file(
+                name="tiny.txt",
+                content="hello",
+                mime_type="text/plain",
+            )
+        )
+    )
+
+    assert payload["ok"] is True
+    assert payload["data"]["id"] == "file-1"
+    assert captured["body"] == {"name": "tiny.txt"}
+    assert captured["fields"] == gm.DEFAULT_DRIVE_UPLOAD_FIELDS
+    assert captured["media_body"].mimetype() == "text/plain"
+    assert captured["media_body"].size() == 5
+
+
+def test_drive_upload_file_resumable_mode_starts_metadata_only_session(monkeypatch):
+    captured = {}
+
+    class _FakeResponse:
+        status_code = 200
+        ok = True
+        headers = {
+            "Location": "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=session-1",
+            "content-type": "",
+        }
+        text = ""
+
+        def json(self):
+            return {}
+
+    class _FakeSession:
+        def post(self, url, *, params=None, json=None, headers=None):
+            captured.update(
+                {
+                    "url": url,
+                    "params": params,
+                    "json": json,
+                    "headers": headers,
+                }
+            )
+            return _FakeResponse()
+
+    class _FakeClient:
+        def get_session(self):
+            return _FakeSession(), True
+
+        def is_session_cached(self):
+            return True
+
+    monkeypatch.setattr(gm, "client", _FakeClient())
+
+    payload = json.loads(
+        asyncio.run(
+            gm.drive_upload_file(
+                name="large.pdf",
+                content="",
+                mime_type="application/pdf",
+                parent_id="parent-1",
+                upload_mode="resumable",
+                file_size=23_600_000,
+            )
+        )
+    )
+
+    assert payload["ok"] is True
+    assert captured["url"] == "https://www.googleapis.com/upload/drive/v3/files"
+    assert captured["params"] == {
+        "uploadType": "resumable",
+        "fields": gm.DEFAULT_DRIVE_UPLOAD_FIELDS,
+    }
+    assert captured["json"] == {"name": "large.pdf", "parents": ["parent-1"]}
+    assert captured["headers"]["Content-Type"] == "application/json; charset=UTF-8"
+    assert captured["headers"]["X-Upload-Content-Type"] == "application/pdf"
+    assert captured["headers"]["X-Upload-Content-Length"] == "23600000"
+
+    data = payload["data"]
+    assert data["upload_mode"] == "resumable"
+    assert data["upload_method"] == "PUT"
+    assert data["upload_url"].endswith("upload_id=session-1")
+    assert data["upload_headers"] == {
+        "Content-Type": "application/pdf",
+        "Content-Length": 23_600_000,
+    }
+    assert data["chunk_size_multiple_bytes"] == gm.DRIVE_RESUMABLE_CHUNK_MULTIPLE
+
+
 def test_chunked_uses_provider_sized_batches():
     chunks = gm._chunked(list(range(2501)), 1000)
     assert [len(chunk) for chunk in chunks] == [1000, 1000, 501]

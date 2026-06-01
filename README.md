@@ -194,6 +194,27 @@ List/search tools accept `page_token` and return `nextPageToken` in the response
 
 Agents should prefer `meta.next_page_token` for paging; `data.nextPageToken` remains for compatibility.
 
+## Large Drive uploads
+
+For small files, `drive_upload_file` can still upload text or base64 content
+directly in the MCP request. For files too large for the portal JSON request
+body, call:
+
+```text
+drive_upload_file(
+  name="report.pdf",
+  content="",
+  mime_type="application/pdf",
+  upload_mode="resumable",
+  file_size=23600000
+)
+```
+
+The tool starts a Google Drive resumable upload session and returns an
+`upload_url`. Upload the file bytes to that URL with `PUT`, `Content-Type`, and
+`Content-Length`; chunked uploads should use chunk sizes that are multiples of
+256 KiB except for the final chunk.
+
 ## Performance tips
 
 - Most `get` and list tools accept `fields` for partial responses.

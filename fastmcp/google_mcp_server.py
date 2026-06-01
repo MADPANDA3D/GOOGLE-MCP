@@ -48,6 +48,8 @@ DEFAULT_SCOPES = (
 )
 DEFAULT_DRIVE_FIELDS = "files(id,name,mimeType,modifiedTime,size),nextPageToken"
 DEFAULT_DRIVE_GET_FIELDS = "id,name,mimeType,modifiedTime,size,parents"
+DEFAULT_DRIVE_UPLOAD_FIELDS = "id,name,mimeType,parents"
+DRIVE_RESUMABLE_CHUNK_MULTIPLE = 256 * 1024
 DEFAULT_DOCS_FIELDS = "documentId,title"
 DEFAULT_SHEETS_FIELDS = "spreadsheetId,properties.title,sheets.properties"
 DEFAULT_SLIDES_FIELDS = "presentationId,title,slides(objectId)"
@@ -1275,7 +1277,8 @@ TOOL_DESCRIPTIONS = {
     ),
     "drive_upload_file": (
         "Use this Google Drive write tool to upload text or base64 content as a new "
-        "file. It creates a Drive file and returns its ID, name, MIME type, and parents."
+        "file, or set upload_mode='resumable' to start a metadata-only large-file "
+        "upload session that avoids portal JSON payload limits."
     ),
     "drive_download_file": (
         "Use this read-only Google Drive tool to get a download/export URL or bounded "
@@ -1499,9 +1502,11 @@ COMMON_PARAMETER_DESCRIPTIONS = {
     "name": "Provider-visible resource name.",
     "parent_id": "Optional Google Drive parent folder ID.",
     "allow_any_parent": "Set true only when intentionally bypassing the configured Drive parent allowlist.",
-    "content": "Text content or base64 content to upload.",
+    "content": "Text or base64 content for direct uploads. Leave empty for resumable sessions.",
     "mime_type": "MIME type for uploaded content.",
     "is_base64": "Set true when content is base64 encoded.",
+    "upload_mode": "Use direct for small content in the MCP request, or resumable to create a Google upload session for large files.",
+    "file_size": "Optional byte size for a resumable upload session.",
     "export_mime_type": "MIME type to export Google-native files as.",
     "include_content": "Set true to include bounded base64 content in the response.",
     "return_mode": "Return mode for Drive downloads.",
@@ -1585,6 +1590,7 @@ COMMON_PARAMETER_DESCRIPTIONS = {
 PARAMETER_ENUMS = {
     "method": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
     "return_mode": ["", "url", "base64", "both"],
+    "upload_mode": ["direct", "resumable"],
     "mode": ["trash", "permanent"],
     "format": ["minimal", "metadata", "full", "raw"],
     "value_input_option": ["RAW", "USER_ENTERED"],
@@ -2184,32 +2190,118 @@ async def drive_create_folder(
 @mcp.tool()
 async def drive_upload_file(
     name: str,
-    content: str,
+    content: str | None = None,
     mime_type: str = "text/plain",
     parent_id: str = "",
     is_base64: bool = False,
     allow_any_parent: bool = False,
+    upload_mode: str = "direct",
+    file_size: int | None = None,
+    fields: str = "",
 ) -> str:
-    """Upload a file to Drive from text or base64 content."""
+    """Upload a file to Drive directly or start a resumable upload session."""
 
     def _upload():
         if not name:
             raise ValueError("name cannot be empty")
-        if content is None:
-            raise ValueError("content cannot be empty")
-        service, cached = client.get_service("drive", "v3")
+        mode = (upload_mode or "direct").strip().lower()
+        if mode not in {"direct", "resumable"}:
+            raise ValueError("upload_mode must be one of: direct, resumable.")
+        effective_fields = fields or DEFAULT_DRIVE_UPLOAD_FIELDS
         effective_parent_id = _enforce_drive_allowlist(parent_id, allow_any_parent)
+        body: dict[str, Any] = {"name": name}
+        if effective_parent_id:
+            body["parents"] = [effective_parent_id]
+
+        if mode == "resumable":
+            if content not in {None, ""}:
+                raise ValueError(
+                    "content must be empty when upload_mode='resumable'. "
+                    "Upload the file bytes to the returned upload_url."
+                )
+            upload_size: int | None = None
+            if file_size is not None:
+                try:
+                    upload_size = int(file_size)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("file_size must be a non-negative integer.") from exc
+                if upload_size < 0:
+                    raise ValueError("file_size must be a non-negative integer.")
+            if not mime_type:
+                mime = "application/octet-stream"
+            else:
+                mime = mime_type
+
+            session, cached = client.get_session()
+            headers = {
+                "Content-Type": "application/json; charset=UTF-8",
+                "X-Upload-Content-Type": mime,
+            }
+            if upload_size is not None:
+                headers["X-Upload-Content-Length"] = str(upload_size)
+            response = session.post(
+                "https://www.googleapis.com/upload/drive/v3/files",
+                params={"uploadType": "resumable", "fields": effective_fields},
+                json=body,
+                headers=headers,
+            )
+            payload: dict[str, Any] = {
+                "status": response.status_code,
+                "headers": {
+                    "content_type": response.headers.get("content-type", ""),
+                    "location_present": bool(response.headers.get("Location")),
+                },
+            }
+            content_type = response.headers.get("content-type", "")
+            if "application/json" in content_type:
+                payload["json"] = response.json()
+            elif getattr(response, "text", ""):
+                payload["text"] = response.text[:20000]
+            if not response.ok:
+                raise _provider_error(
+                    "Google Drive",
+                    payload,
+                    status=response.status_code,
+                    retry_after=_retry_after_seconds(dict(response.headers or {})),
+                )
+            upload_url = response.headers.get("Location")
+            if not upload_url:
+                raise _provider_error(
+                    "Google Drive",
+                    payload,
+                    status=response.status_code,
+                    message="Google Drive did not return a resumable upload session URI.",
+                )
+            upload_headers: dict[str, Any] = {"Content-Type": mime}
+            if upload_size is not None:
+                upload_headers["Content-Length"] = upload_size
+            return (
+                {
+                    "upload_mode": "resumable",
+                    "file": body,
+                    "upload_url": upload_url,
+                    "upload_method": "PUT",
+                    "upload_headers": upload_headers,
+                    "chunk_size_multiple_bytes": DRIVE_RESUMABLE_CHUNK_MULTIPLE,
+                    "expires_after": "Google Drive resumable session URIs expire after one week.",
+                    "warning": "Treat upload_url as a temporary capability URL for this file upload only.",
+                },
+                {"cached_session": cached},
+            )
+
+        if content is None:
+            raise ValueError(
+                "content is required for direct uploads. For large files, use upload_mode='resumable'."
+            )
+        service, cached = client.get_service("drive", "v3")
         data = (
             base64.b64decode(content.encode("ascii")) if is_base64 else content.encode("utf-8")
         )
         media = MediaInMemoryUpload(data, mimetype=mime_type, resumable=False)
-        body: dict[str, Any] = {"name": name}
-        if effective_parent_id:
-            body["parents"] = [effective_parent_id]
         request = service.files().create(
             body=body,
             media_body=media,
-            fields="id,name,mimeType,parents",
+            fields=effective_fields,
         )
         return request.execute(), {"cached_service": cached}
 
