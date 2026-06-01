@@ -862,3 +862,53 @@ def test_raw_request_blocks_non_google_hosts_in_strict_mode():
         assert "host is not allowed" in str(exc)
     else:  # pragma: no cover - defensive
         raise AssertionError("expected strict raw host validation error")
+
+
+def test_raw_request_returns_headers_for_empty_json_response(monkeypatch):
+    upload_url = (
+        "https://www.googleapis.com/upload/drive/v3/files"
+        "?uploadType=resumable&upload_id=session-raw-1"
+    )
+
+    class _FakeResponse:
+        status_code = 200
+        ok = True
+        headers = {"content-type": "application/json; charset=UTF-8", "Location": upload_url}
+        text = ""
+        content = b""
+
+        def json(self):
+            raise json.JSONDecodeError("Expecting value", "", 0)
+
+    class _FakeSession:
+        def request(self, method, url, *, params=None, json=None, headers=None):
+            return _FakeResponse()
+
+    class _FakeClient:
+        def get_session(self):
+            return _FakeSession(), True
+
+        def is_session_cached(self):
+            return True
+
+    monkeypatch.setattr(gm, "client", _FakeClient())
+
+    payload = json.loads(
+        asyncio.run(
+            gm.google_raw_request(
+                method="POST",
+                url="https://www.googleapis.com/upload/drive/v3/files",
+                params={"uploadType": "resumable", "fields": "id,name"},
+                json_body={"name": "large.pdf", "mimeType": "application/pdf"},
+                headers={
+                    "Content-Type": "application/json; charset=UTF-8",
+                    "X-Upload-Content-Type": "application/pdf",
+                },
+            )
+        )
+    )
+
+    assert payload["ok"] is True
+    assert payload["data"]["status"] == 200
+    assert payload["data"]["headers"]["Location"] == upload_url
+    assert payload["data"]["location"] == upload_url

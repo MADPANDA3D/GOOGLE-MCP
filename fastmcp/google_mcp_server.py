@@ -573,6 +573,19 @@ def _retry_after_seconds(headers: dict[str, Any] | None) -> float | None:
         return None
 
 
+def _header_value(headers: Any, name: str) -> str:
+    if not headers:
+        return ""
+    value = headers.get(name)
+    if value is not None:
+        return str(value)
+    lowered = name.lower()
+    for key, item in dict(headers).items():
+        if str(key).lower() == lowered:
+            return str(item)
+    return ""
+
+
 class GoogleProviderError(RuntimeError):
     def __init__(
         self,
@@ -2015,16 +2028,24 @@ async def google_raw_request(
             json=json_body,
             headers=headers,
         )
-        content_type = response.headers.get("content-type", "")
+        content_type = _header_value(response.headers, "content-type")
         payload: dict[str, Any] = {
             "status": response.status_code,
             "headers": dict(response.headers),
         }
+        location = _header_value(response.headers, "Location")
+        if location:
+            payload["location"] = location
+        body_text = getattr(response, "text", "")
+        body_content = getattr(response, "content", b"")
         if "application/json" in content_type:
-            payload["json"] = response.json()
+            if body_content or (isinstance(body_text, str) and body_text.strip()):
+                payload["json"] = response.json()
+            else:
+                payload["body_empty"] = True
             return payload, {"cached_session": cached}
         try:
-            text = response.text
+            text = body_text
             payload["text"] = text
         except UnicodeDecodeError:
             payload["content_base64"] = base64.b64encode(response.content).decode("ascii")
