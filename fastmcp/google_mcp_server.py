@@ -1513,7 +1513,11 @@ COMMON_PARAMETER_DESCRIPTIONS = {
     "file_id": "Google Drive file ID.",
     "file_ids": "List of Google Drive file IDs.",
     "name": "Provider-visible resource name.",
-    "parent_id": "Optional Google Drive parent folder ID.",
+    "parent_id": (
+        "Optional Google Drive parent folder ID. Folder-style aliases such as "
+        "folder_id, folderId, parent_folder_id, parentFolderId, and parents are "
+        "normalized here."
+    ),
     "allow_any_parent": "Set true only when intentionally bypassing the configured Drive parent allowlist.",
     "content": "Text or base64 content for direct uploads. Leave empty for resumable sessions.",
     "mime_type": "MIME type for uploaded content.",
@@ -6443,6 +6447,26 @@ def _camel_to_snake(value: str) -> str:
     return re.sub("([a-z0-9])([A-Z])", r"\1_\2", first_pass).lower()
 
 
+PARENT_ID_ARGUMENT_ALIASES = {
+    "folder_id",
+    "parent_folder_id",
+    "parents",
+}
+
+
+def _has_canonical_argument(arguments: dict[str, Any], canonical_key: str) -> bool:
+    return canonical_key in arguments or any(
+        isinstance(key, str) and _camel_to_snake(key) == canonical_key
+        for key in arguments
+    )
+
+
+def _coerce_parent_id_alias_value(alias_key: str, value: Any) -> Any:
+    if alias_key == "parents" and isinstance(value, list):
+        return value[0] if value else ""
+    return value
+
+
 def _normalize_tool_arguments(payload: dict[str, Any]) -> dict[str, Any]:
     if payload.get("method") != "tools/call":
         return payload
@@ -6463,14 +6487,26 @@ def _normalize_tool_arguments(payload: dict[str, Any]) -> dict[str, Any]:
     allowed = set(tool.parameters.get("properties", {}).keys())
     normalized: dict[str, Any] = {}
     changed = False
+    parent_id_supplied = _has_canonical_argument(arguments, "parent_id")
     for key, value in arguments.items():
         target_key = key
+        target_value = value
+        snake_key = _camel_to_snake(key) if isinstance(key, str) else key
         if key not in allowed:
-            snake_key = _camel_to_snake(key)
             if snake_key in allowed and snake_key not in arguments:
                 target_key = snake_key
                 changed = True
-        normalized[target_key] = value
+            elif (
+                "parent_id" in allowed
+                and isinstance(snake_key, str)
+                and snake_key in PARENT_ID_ARGUMENT_ALIASES
+            ):
+                changed = True
+                if parent_id_supplied or "parent_id" in normalized:
+                    continue
+                target_key = "parent_id"
+                target_value = _coerce_parent_id_alias_value(snake_key, value)
+        normalized[target_key] = target_value
     if changed:
         params["arguments"] = normalized
     return payload

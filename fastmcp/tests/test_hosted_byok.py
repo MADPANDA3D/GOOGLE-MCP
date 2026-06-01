@@ -193,6 +193,34 @@ def test_gmail_batch_metadata_camel_case_alias_is_normalized():
     assert args["metadata_headers"] == ["Subject"]
 
 
+def test_drive_upload_file_folder_aliases_are_normalized_to_parent_id():
+    aliases = {
+        "folder_id": "folder-1",
+        "folderId": "folder-1",
+        "parent_folder_id": "folder-1",
+        "parentFolderId": "folder-1",
+        "parents": ["folder-1"],
+    }
+    for alias, value in aliases.items():
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 15,
+            "method": "tools/call",
+            "params": {
+                "name": "drive_upload_file",
+                "arguments": {
+                    "name": "tiny.txt",
+                    "content": "hello",
+                    alias: value,
+                },
+            },
+        }
+        gm._normalize_tool_arguments(payload)
+        args = payload["params"]["arguments"]
+        assert args["parent_id"] == "folder-1"
+        assert alias not in args
+
+
 def test_gmail_sender_key_prefers_list_id_then_domain():
     sender = gm._gmail_sender_key(
         {
