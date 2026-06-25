@@ -360,6 +360,72 @@ def test_gmail_sender_clusters_obeys_sample_limit(monkeypatch):
     assert cluster["subjects_sample"] == ["Subject 0", "Subject 1"]
 
 
+def test_gmail_metadata_fetch_uses_google_batch_requests():
+    batch_sizes = []
+
+    class _FakeRequest:
+        def __init__(self, message_id):
+            self.message_id = message_id
+
+        def execute(self):  # pragma: no cover - batch path should not call this
+            raise AssertionError("sequential get should not run")
+
+    class _FakeBatch:
+        def __init__(self, callback):
+            self.callback = callback
+            self.requests = []
+
+        def add(self, request, request_id):
+            self.requests.append((request_id, request))
+
+        def execute(self):
+            batch_sizes.append(len(self.requests))
+            for request_id, request in self.requests:
+                self.callback(
+                    request_id,
+                    {
+                        "id": request.message_id,
+                        "threadId": f"t-{request.message_id}",
+                        "labelIds": ["UNREAD"],
+                        "payload": {
+                            "headers": [
+                                {"name": "From", "value": "News <news@example.com>"}
+                            ]
+                        },
+                    },
+                    None,
+                )
+
+    class _FakeMessages:
+        def get(self, **kwargs):
+            assert kwargs["format"] == "metadata"
+            assert kwargs["fields"] == "id,threadId,labelIds,snippet,internalDate,payload/headers"
+            return _FakeRequest(kwargs["id"])
+
+    class _FakeUsers:
+        def messages(self):
+            return _FakeMessages()
+
+    class _FakeService:
+        def users(self):
+            return _FakeUsers()
+
+        def new_batch_http_request(self, callback):
+            return _FakeBatch(callback)
+
+    results = gm._gmail_get_metadata_batch(
+        _FakeService(),
+        [f"m{index}" for index in range(250)],
+        max_messages=250,
+    )
+
+    assert batch_sizes == [5] * 50
+    assert len(results) == 250
+    assert results[0]["id"] == "m0"
+    assert results[-1]["id"] == "m249"
+    assert results[0]["headers"]["from"] == "News <news@example.com>"
+
+
 def test_workspace_create_tools_request_compact_fields(monkeypatch):
     captured = {}
 

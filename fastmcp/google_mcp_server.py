@@ -66,6 +66,7 @@ DEFAULT_GMAIL_METADATA_HEADERS = (
     "Date",
     "Message-ID",
 )
+GMAIL_METADATA_BATCH_SIZE = 5
 
 MCP_HTTP_PORT = int(os.getenv("MCP_HTTP_PORT", "8086"))
 MCP_BIND_ADDRESS = os.getenv("MCP_BIND_ADDRESS", "0.0.0.0")
@@ -986,6 +987,18 @@ def _gmail_list_message_ids(
     return messages, next_token, estimate, pages
 
 
+def _gmail_metadata_entry(data: dict[str, Any]) -> dict[str, Any]:
+    header_map = _header_map(data.get("payload", {}).get("headers", []) or [])
+    return {
+        "id": data.get("id"),
+        "threadId": data.get("threadId"),
+        "labelIds": data.get("labelIds", []) or [],
+        "snippet": data.get("snippet", ""),
+        "internalDate": data.get("internalDate"),
+        "headers": header_map,
+    }
+
+
 def _gmail_get_metadata_batch(
     service,
     message_ids: list[str],
@@ -1002,7 +1015,47 @@ def _gmail_get_metadata_batch(
         "List-Unsubscribe",
     ]
     results: list[dict[str, Any]] = []
-    for message_id in message_ids[: _clamp_int(max_messages, minimum=1, maximum=5000)]:
+    ids = [
+        message_id
+        for message_id in message_ids[: _clamp_int(max_messages, minimum=1, maximum=5000)]
+        if message_id
+    ]
+    if hasattr(service, "new_batch_http_request"):
+        for chunk in _chunked(ids, GMAIL_METADATA_BATCH_SIZE):
+            batch_results: dict[str, dict[str, Any]] = {}
+            batch_errors: list[Exception] = []
+
+            def _callback(request_id, response, exception):
+                if exception is not None:
+                    batch_errors.append(exception)
+                    return
+                batch_results[str(request_id)] = _gmail_metadata_entry(response or {})
+
+            batch = service.new_batch_http_request(callback=_callback)
+            for index, message_id in enumerate(chunk):
+                batch.add(
+                    service.users()
+                    .messages()
+                    .get(
+                        userId="me",
+                        id=message_id,
+                        format="metadata",
+                        metadataHeaders=headers,
+                        fields="id,threadId,labelIds,snippet,internalDate,payload/headers",
+                    ),
+                    request_id=str(index),
+                )
+            batch.execute()
+            if batch_errors:
+                raise batch_errors[0]
+            results.extend(
+                batch_results[str(index)]
+                for index in range(len(chunk))
+                if str(index) in batch_results
+            )
+        return results
+
+    for message_id in ids:
         if not message_id:
             continue
         data = (
@@ -1013,20 +1066,11 @@ def _gmail_get_metadata_batch(
                 id=message_id,
                 format="metadata",
                 metadataHeaders=headers,
+                fields="id,threadId,labelIds,snippet,internalDate,payload/headers",
             )
             .execute()
         )
-        header_map = _header_map(data.get("payload", {}).get("headers", []) or [])
-        results.append(
-            {
-                "id": data.get("id"),
-                "threadId": data.get("threadId"),
-                "labelIds": data.get("labelIds", []) or [],
-                "snippet": data.get("snippet", ""),
-                "internalDate": data.get("internalDate"),
-                "headers": header_map,
-            }
-        )
+        results.append(_gmail_metadata_entry(data))
     return results
 
 
