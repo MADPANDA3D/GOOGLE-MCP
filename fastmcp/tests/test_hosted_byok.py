@@ -177,7 +177,7 @@ def test_only_standard_navigation_tools_are_grant_only(monkeypatch):
         client.close()
 
 
-def test_legacy_navigation_provider_tools_and_protocol_calls_still_require_byok():
+def test_legacy_navigation_provider_tools_and_tool_listing_still_require_byok():
     payloads = [
         {
             "jsonrpc": "2.0",
@@ -195,16 +195,6 @@ def test_legacy_navigation_provider_tools_and_protocol_calls_still_require_byok(
             "params": {"name": "drive_list_files", "arguments": {}},
         },
         {"jsonrpc": "2.0", "id": 42, "method": "tools/list", "params": {}},
-        {
-            "jsonrpc": "2.0",
-            "id": 43,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-03-26",
-                "capabilities": {},
-                "clientInfo": {"name": "test", "version": "1"},
-            },
-        },
     ]
     client = TestClient(_minimal_ok_app())
     try:
@@ -245,12 +235,58 @@ def test_partial_byok_headers_are_rejected():
 
 def test_tools_list_succeeds_with_valid_byok_headers():
     with _mcp_client() as client:
+        grant_only_headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-MADPANDA-PORTAL-GRANT": "test-portal-grant",
+        }
+        initialized = client.post(
+            "/mcp",
+            headers=grant_only_headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": 43,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "test", "version": "1"},
+                },
+            },
+        )
+        ready = client.post(
+            "/mcp",
+            headers=grant_only_headers,
+            json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+        )
+        capabilities = client.post(
+            "/mcp",
+            headers=grant_only_headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": 44,
+                "method": "tools/call",
+                "params": {
+                    "name": "list_capabilities",
+                    "arguments": {"include_descriptors": False},
+                },
+            },
+        )
         response = client.post(
             "/mcp",
             headers=_mcp_headers(),
             json={"jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}},
         )
 
+    assert initialized.status_code == 200
+    assert initialized.json()["result"]["serverInfo"]["name"]
+    assert ready.status_code in {200, 202}
+    assert capabilities.status_code == 200
+    capability_result = json.loads(
+        capabilities.json()["result"]["content"][0]["text"]
+    )
+    assert capability_result["serviceId"] == "google"
+    assert capability_result["counts"]["raw"] == 150
     payload = response.json()
     assert response.status_code == 200
     assert "result" in payload

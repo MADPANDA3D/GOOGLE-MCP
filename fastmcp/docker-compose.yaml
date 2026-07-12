@@ -5,7 +5,7 @@ services:
       context: .
       args:
         MCP_BUILD_SHA: ${MCP_BUILD_SHA:-unknown}
-        MCP_IMAGE_VERSION: google-2026.07.12.1
+        MCP_IMAGE_VERSION: google-2026.07.12.2
     container_name: google-mcp
     restart: unless-stopped
     init: true

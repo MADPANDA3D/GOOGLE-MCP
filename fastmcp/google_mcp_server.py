@@ -6659,8 +6659,12 @@ def _extract_jsonrpc_id(payload: dict[str, Any] | None) -> str | int:
     return "server-error"
 
 
-def _is_grant_only_navigation_request(payload: dict[str, Any] | None) -> bool:
-    if not isinstance(payload, dict) or payload.get("method") != "tools/call":
+def _is_grant_only_request(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("method") in {"initialize", "notifications/initialized"}:
+        return True
+    if payload.get("method") != "tools/call":
         return False
     params = payload.get("params")
     if not isinstance(params, dict):
@@ -6935,7 +6939,7 @@ def build_hosted_mcp_http_wrapper(app):
             normalized_payload = _normalize_tool_arguments(payload)
             if normalized_payload is not payload or normalized_payload != payload:
                 payload = normalized_payload
-            grant_only_navigation = _is_grant_only_navigation_request(payload)
+            grant_only_navigation = _is_grant_only_request(payload)
             body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode(
                 "utf-8"
             )

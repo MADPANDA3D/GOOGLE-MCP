@@ -196,7 +196,7 @@ Start with `find_tools` for a task-ranked shortlist, then call
 the full provider-owned ToolManifest. `get_endpoint_coverage` reports REST
 coverage, and `check_configuration` reports setup without exposing credentials.
 
-Catalog version `google-2026.07.12.1` classifies 144 tools as `agent_ready`, five
+Catalog version `google-2026.07.12.2` classifies 144 tools as `agent_ready`, five
 compatibility tools as `legacy`, and the open-ended `google_raw_request` as
 `hidden`. Legacy and hidden tools remain available through advanced broker
 profiles but are not returned by default discovery. Every descriptor includes
