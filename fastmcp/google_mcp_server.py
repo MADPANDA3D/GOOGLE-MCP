@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import copy
 import contextvars
 import hashlib
 import hmac
@@ -17,6 +18,7 @@ from collections import Counter, OrderedDict, defaultdict
 from dataclasses import dataclass
 from email.message import EmailMessage
 from email.utils import parseaddr
+from functools import lru_cache
 from typing import Any, Callable
 
 from google.auth.transport.requests import AuthorizedSession, Request
@@ -29,6 +31,14 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 import uvicorn
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+from tool_manifest import (
+    CATALOG_VERSION,
+    STANDARD_NAVIGATION_TOOLS,
+    build_tool_manifest,
+    resolve_descriptor,
+    search_manifest,
+)
 
 
 DEFAULT_SCOPES = (
@@ -135,7 +145,7 @@ MCP_BYOK_CLIENT_CACHE_TTL_SECONDS = max(
     float(os.getenv("MCP_BYOK_CLIENT_CACHE_TTL_SECONDS", "900")),
     0.0,
 )
-EXPECTED_TOOL_COUNT = 145
+EXPECTED_TOOL_COUNT = 150
 
 SERVER_START_TIME = time.time()
 SERVER_START_MONO = time.monotonic()
@@ -210,7 +220,7 @@ class GoogleWorkspaceClient:
         self.persist_token = persist_token
         self._lock = threading.Lock()
         self._creds: Credentials | None = None
-        self._service_cache: dict[tuple[str, str], Any] = {}
+        self._service_cache: dict[tuple[str, str, tuple[str, ...]], Any] = {}
         self._session: AuthorizedSession | None = None
 
     def _save_token(self, creds: Credentials) -> None:
@@ -701,7 +711,7 @@ def _response_payload(
     error: dict[str, Any] | None,
     meta: dict[str, Any],
 ) -> str:
-    payload = {
+    payload: dict[str, Any] = {
         "ok": ok,
         "data": data if ok else None,
         "error": error if not ok else None,
@@ -1299,11 +1309,17 @@ DESTRUCTIVE_TOOLS = {
     "calendar_delete_event",
 }
 NAVIGATION_TOOLS = {
+    "check_configuration",
+    "list_capabilities",
+    "get_endpoint_coverage",
+    "get_tool_usage",
+    "find_tools",
     "google_mcp_welcome",
     "google_mcp_list_capabilities",
     "google_mcp_get_endpoint_coverage",
     "google_mcp_get_tool_usage",
 }
+GRANT_ONLY_NAVIGATION_TOOLS = set(STANDARD_NAVIGATION_TOOLS)
 
 TOOL_DESCRIPTIONS = {
     "google_raw_request": (
@@ -1545,6 +1561,27 @@ TOOL_DESCRIPTIONS = {
         "Use this read-only navigation tool to get usage, side effects, and related "
         "tools for a specific Google MCP tool."
     ),
+    "check_configuration": (
+        "Use this local read-only navigation tool to check Portal gate readiness and "
+        "whether the current request supplied every Google BYOK header, without "
+        "contacting Google or exposing credential values."
+    ),
+    "list_capabilities": (
+        "Use this local read-only navigation tool to return Google ToolManifest counts "
+        "or the complete lossless provider-owned descriptor catalog."
+    ),
+    "get_endpoint_coverage": (
+        "Use this local read-only navigation tool to inspect bounded Google endpoint "
+        "coverage by provider API and implementation status."
+    ),
+    "get_tool_usage": (
+        "Use this local read-only navigation tool to resolve one native, canonical, or "
+        "alias identity to its complete lossless ToolManifest descriptor."
+    ),
+    "find_tools": (
+        "Use this local read-only navigation tool to rank Google tools for a task using "
+        "punctuation-normalized multi-token search and optional category or risk filters."
+    ),
 }
 
 COMMON_PARAMETER_DESCRIPTIONS = {
@@ -1642,6 +1679,10 @@ COMMON_PARAMETER_DESCRIPTIONS = {
     "params": "Optional query parameters for google_raw_request.",
     "json_body": "Optional JSON request body for google_raw_request.",
     "category": "Optional capability category filter.",
+    "risk": "Optional exact read, write, or destructive manifest risk filter.",
+    "limit": "Maximum bounded result count; defaults to 8 and cannot exceed 25 for tool search.",
+    "include_descriptors": "When true, return every complete ToolManifest descriptor; false returns counts only.",
+    "include_legacy": "When true, include legacy broker-reachable tools in discovery; hidden tools remain excluded.",
     "api": "Optional Google API filter such as drive, docs, sheets, slides, gmail, or calendar.",
     "resource": "Optional provider resource filter such as files, users.messages, or events.",
     "status": "Optional coverage status filter.",
@@ -1658,6 +1699,7 @@ PARAMETER_ENUMS = {
     "label_list_visibility": ["labelShow", "labelShowIfUnread", "labelHide"],
     "message_list_visibility": ["show", "hide"],
     "send_updates": ["all", "externalOnly", "none"],
+    "risk": ["", "read", "write", "destructive"],
     "status": [
         "",
         "implemented",
@@ -5725,6 +5767,147 @@ async def adsense_generate_report(account_name: str, report_request: dict[str, A
     return await run_tool("adsense", "generate_report", _generate_report, allow_retry=True)
 
 
+@lru_cache(maxsize=1)
+def _current_tool_manifest() -> dict[str, Any]:
+    return build_tool_manifest(_tool_registry())
+
+
+@mcp.tool()
+async def check_configuration() -> str:
+    """Check safe Google MCP and current-request configuration readiness."""
+
+    def _check_configuration():
+        headers = ACTIVE_REQUEST_HEADERS.get() or {}
+        provider_headers = (
+            MCP_GOOGLE_CLIENT_ID_HEADER,
+            MCP_GOOGLE_CLIENT_SECRET_HEADER,
+            MCP_GOOGLE_REFRESH_TOKEN_HEADER,
+        )
+        missing = [name for name in provider_headers if not headers.get(name)]
+        return {
+            "configured": bool(MCP_PORTAL_GRANT_TOKEN),
+            "portalGrantRequired": True,
+            "portalGateConfigured": bool(MCP_PORTAL_GRANT_TOKEN),
+            "providerCredentialsRequiredForProviderTools": True,
+            "providerReadyForCurrentRequest": not missing,
+            "missingProviderHeaders": missing,
+            "mapsKeyReadyForCurrentRequest": bool(
+                headers.get(MCP_GOOGLE_MAPS_API_KEY_HEADER) or GOOGLE_MAPS_API_KEY
+            ),
+            "catalogVersion": CATALOG_VERSION,
+            "buildSha": _current_tool_manifest()["buildSha"],
+        }
+
+    return await run_tool(
+        "mcp", "check_configuration", _check_configuration, allow_retry=False
+    )
+
+
+@mcp.tool()
+async def list_capabilities(include_descriptors: bool = False) -> str:
+    """Return Google ToolManifest counts or every complete descriptor."""
+
+    manifest = copy.deepcopy(_current_tool_manifest())
+    if not include_descriptors:
+        manifest["tools"] = []
+    return json_dumps(manifest)
+
+
+@mcp.tool()
+async def get_endpoint_coverage(
+    category: str = "",
+    status: str = "",
+    limit: int = 100,
+) -> str:
+    """Return bounded Google endpoint coverage without contacting Google."""
+
+    def _coverage():
+        category_filter = category.strip().lower()
+        status_filter = status.strip().lower()
+        row_limit = _clamp_int(limit, minimum=1, maximum=500)
+        rows = []
+        for row in ENDPOINT_COVERAGE:
+            api = str(row.get("api", "")).lower()
+            resource = str(row.get("resource", "")).lower()
+            row_status = str(row.get("status", "")).lower()
+            normalized_status = (
+                "missing" if row_status == "partially_implemented" else row_status
+            )
+            if category_filter and category_filter not in {api, resource}:
+                if category_filter not in api and category_filter not in resource:
+                    continue
+            if status_filter and status_filter not in {
+                row_status,
+                normalized_status,
+            }:
+                continue
+            rows.append(copy.deepcopy(row))
+            if len(rows) >= row_limit:
+                break
+        return {
+            "source": "Official Google REST discovery documents; see docs/endpoint-coverage.md.",
+            "retrieved": "2026-04-29",
+            "filters": {
+                "category": category or None,
+                "status": status or None,
+            },
+            "returned": len(rows),
+            "rows": rows,
+        }
+
+    return await run_tool(
+        "mcp", "get_endpoint_coverage", _coverage, allow_retry=False
+    )
+
+
+@mcp.tool()
+async def get_tool_usage(tool_name: str = "") -> str:
+    """Return one complete lossless Google ToolManifest descriptor."""
+
+    def _usage():
+        if not tool_name.strip():
+            raise ValueError("tool_name is required")
+        descriptor = resolve_descriptor(_current_tool_manifest(), tool_name)
+        if descriptor is None:
+            raise ValueError("Unknown Google tool identity.")
+        return {"descriptor": copy.deepcopy(descriptor)}
+
+    return await run_tool("mcp", "get_tool_usage", _usage, allow_retry=False)
+
+
+@mcp.tool()
+async def find_tools(
+    query: str,
+    category: str = "",
+    risk: str = "",
+    include_legacy: bool = False,
+    limit: int = 8,
+) -> str:
+    """Rank Google tools with deterministic punctuation-normalized search."""
+
+    def _find_tools():
+        matches = search_manifest(
+            _current_tool_manifest(),
+            query=query,
+            category=category,
+            risk=risk,
+            include_legacy=include_legacy,
+            limit=limit,
+        )
+        return {
+            "query": query,
+            "filters": {
+                "category": category or None,
+                "risk": risk or None,
+                "includeLegacy": include_legacy,
+            },
+            "matches": matches,
+            "returned": len(matches),
+        }
+
+    return await run_tool("mcp", "find_tools", _find_tools, allow_retry=False)
+
+
 @mcp.tool()
 async def google_mcp_welcome() -> str:
     """Show Google MCP navigation, setup requirements, and safe starting points."""
@@ -6476,6 +6659,15 @@ def _extract_jsonrpc_id(payload: dict[str, Any] | None) -> str | int:
     return "server-error"
 
 
+def _is_grant_only_navigation_request(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict) or payload.get("method") != "tools/call":
+        return False
+    params = payload.get("params")
+    if not isinstance(params, dict):
+        return False
+    return params.get("name") in GRANT_ONLY_NAVIGATION_TOOLS
+
+
 def _validate_portal_grant(headers: dict[str, str]) -> None:
     if not MCP_PORTAL_GRANT_TOKEN:
         raise ValueError("Server is missing required portal grant configuration.")
@@ -6656,17 +6848,40 @@ def build_hosted_mcp_http_wrapper(app):
 
         if path == "/health":
             tool_count = registered_tool_count()
+            manifest = _current_tool_manifest()
+            counts = manifest["counts"]
+            configuration_ready = bool(MCP_PORTAL_GRANT_TOKEN) and bool(
+                MCP_ALLOW_REQUEST_OVERRIDES
+            )
             await _send_json(
                 send,
                 200,
                 {
                     "ok": True,
+                    "status": "healthy" if configuration_ready else "degraded",
                     "service": "google-mcp",
-                    "version": os.getenv("MCP_SERVER_VERSION", "dev"),
+                    "version": manifest["buildSha"],
+                    "build_sha": manifest["buildSha"],
+                    "catalog_version": manifest["catalogVersion"],
+                    "descriptor_hash": manifest["descriptorHash"],
                     "tool_count": tool_count,
-                    "tools": {"total": tool_count},
+                    "raw_tool_count": counts["raw"],
+                    "exposed_tool_count": tool_count,
+                    "agent_ready_tool_count": counts["agentReady"],
+                    "documented_tool_count": counts["raw"],
+                    "tools": {
+                        "total": tool_count,
+                        "raw": counts["raw"],
+                        "exposed": tool_count,
+                        "agent_ready": counts["agentReady"],
+                        "legacy": counts["legacy"],
+                        "hidden": counts["hidden"],
+                        "documented": counts["raw"],
+                    },
                     "configuration": {
+                        "ready": configuration_ready,
                         "portal_grant_configured": bool(MCP_PORTAL_GRANT_TOKEN),
+                        "provider_credentials_mode": "per_request_byok",
                         "byok_headers_required": {
                             MCP_GOOGLE_CLIENT_ID_HEADER: MCP_REQUIRE_REQUEST_GOOGLE_CLIENT_ID,
                             MCP_GOOGLE_CLIENT_SECRET_HEADER: MCP_REQUIRE_REQUEST_GOOGLE_CLIENT_SECRET,
@@ -6685,9 +6900,24 @@ def build_hosted_mcp_http_wrapper(app):
             await app(scope, receive, send)
             return
 
+        normalized_headers = _normalize_header_map(scope.get("headers", []) or [])
+        try:
+            _validate_portal_grant(normalized_headers)
+        except ValueError as exc:
+            await _send_jsonrpc_error(
+                send,
+                status=401,
+                code=-32001,
+                message=str(exc),
+                request_id="server-error",
+                data={"required_headers": [MCP_PORTAL_GRANT_HEADER]},
+            )
+            return
+
         jsonrpc_id: str | int = "server-error"
         body = b""
         consumed_body = False
+        grant_only_navigation = False
         if method in {"POST", "PUT", "PATCH"}:
             body = await _read_request_body(receive)
             consumed_body = True
@@ -6705,6 +6935,7 @@ def build_hosted_mcp_http_wrapper(app):
             normalized_payload = _normalize_tool_arguments(payload)
             if normalized_payload is not payload or normalized_payload != payload:
                 payload = normalized_payload
+            grant_only_navigation = _is_grant_only_navigation_request(payload)
             body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode(
                 "utf-8"
             )
@@ -6743,39 +6974,29 @@ def build_hosted_mcp_http_wrapper(app):
                 )
                 return
 
-        normalized_headers = _normalize_header_map(scope.get("headers", []) or [])
-        try:
-            _validate_portal_grant(normalized_headers)
-        except ValueError as exc:
-            await _send_jsonrpc_error(
-                send,
-                status=401,
-                code=-32001,
-                message=str(exc),
-                request_id=jsonrpc_id,
-                data={"required_headers": [MCP_PORTAL_GRANT_HEADER]},
-            )
-            return
-
-        try:
-            request_client, _ = _resolve_request_client(scope.get("headers", []) or [])
-        except ValueError as exc:
-            await _send_jsonrpc_error(
-                send,
-                status=401,
-                code=-32001,
-                message=str(exc),
-                request_id=jsonrpc_id,
-                data={
-                    "required_headers": [
-                        MCP_PORTAL_GRANT_HEADER,
-                        MCP_GOOGLE_CLIENT_ID_HEADER,
-                        MCP_GOOGLE_CLIENT_SECRET_HEADER,
-                        MCP_GOOGLE_REFRESH_TOKEN_HEADER,
-                    ],
-                },
-            )
-            return
+        request_client = None
+        if not grant_only_navigation:
+            try:
+                request_client, _ = _resolve_request_client(
+                    scope.get("headers", []) or []
+                )
+            except ValueError as exc:
+                await _send_jsonrpc_error(
+                    send,
+                    status=401,
+                    code=-32001,
+                    message=str(exc),
+                    request_id=jsonrpc_id,
+                    data={
+                        "required_headers": [
+                            MCP_PORTAL_GRANT_HEADER,
+                            MCP_GOOGLE_CLIENT_ID_HEADER,
+                            MCP_GOOGLE_CLIENT_SECRET_HEADER,
+                            MCP_GOOGLE_REFRESH_TOKEN_HEADER,
+                        ],
+                    },
+                )
+                return
 
         token = ACTIVE_GOOGLE_CLIENT.set(request_client)
         headers_token = ACTIVE_REQUEST_HEADERS.set(normalized_headers)

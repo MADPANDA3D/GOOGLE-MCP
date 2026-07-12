@@ -4,6 +4,11 @@ Retrieved: 2026-04-29
 Service: Google MCP (`google-mcp`)  
 Implementation: Python FastMCP, Google API client library plus bounded raw REST escape hatch
 
+ToolManifest conformance verified: 2026-07-12. The provider-owned catalog maps
+all 150 registered native tools to a versioned descriptor. Endpoint inventory
+source retrieval remains 2026-04-29 because this hardening pass did not expand
+or claim new provider endpoint coverage.
+
 Official source set consulted during this audit:
 
 - Google Drive API v3 REST reference and discovery document: <https://developers.google.com/workspace/drive/api/reference/rest/v3>, <https://www.googleapis.com/discovery/v1/apis/drive/v3/rest>
@@ -27,6 +32,10 @@ Legend:
 - `intentionally_excluded`: excluded for safety, callback infrastructure, or legacy provider surface.
 - `blocked_scope`: requires OAuth scopes or account privileges outside the current default hosted BYOK scope set.
 - `raw_escape_hatch`: available through `google_raw_request`, but not counted as curated endpoint coverage.
+
+Agent discovery uses `find_tools`, full references use `get_tool_usage`, and
+bounded coverage reads use `get_endpoint_coverage`. These calls are local and
+grant-only; they do not contact Google or require Google OAuth headers.
 
 ## Summary
 

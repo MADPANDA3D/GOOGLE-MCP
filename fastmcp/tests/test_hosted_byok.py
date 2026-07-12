@@ -89,6 +89,40 @@ def test_invalid_portal_grant_is_rejected():
     assert payload["error"]["message"] == "Invalid portal grant token."
 
 
+def test_missing_portal_grant_rejects_malformed_body_before_parsing():
+    app = _minimal_ok_app()
+    headers = _mcp_headers()
+    headers.pop("X-MADPANDA-PORTAL-GRANT")
+    client = TestClient(app)
+    try:
+        response = client.post(
+            "/mcp",
+            headers=headers,
+            content=b"not-json-and-must-not-be-parsed",
+        )
+    finally:
+        client.close()
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == -32001
+
+
+def test_invalid_portal_grant_rejects_malformed_body_before_parsing():
+    app = _minimal_ok_app()
+    client = TestClient(app)
+    try:
+        response = client.post(
+            "/mcp",
+            headers=_mcp_headers(
+                **{"X-MADPANDA-PORTAL-GRANT": "wrong"}
+            ),
+            content=b"not-json-and-must-not-be-parsed",
+        )
+    finally:
+        client.close()
+    assert response.status_code == 401
+    assert response.json()["error"]["message"] == "Invalid portal grant token."
+
+
 def test_missing_byok_headers_are_rejected():
     app = _minimal_ok_app()
     status_code, payload = _post_json(
@@ -106,6 +140,88 @@ def test_missing_byok_headers_are_rejected():
     assert "x-google-client-id" in payload["error"]["message"]
     assert "x-google-client-secret" in payload["error"]["message"]
     assert "x-google-refresh-token" in payload["error"]["message"]
+
+
+def test_only_standard_navigation_tools_are_grant_only(monkeypatch):
+    def _provider_resolution_must_not_run(_header_items):
+        raise AssertionError("provider credential resolution must not run")
+
+    monkeypatch.setattr(gm, "_resolve_request_client", _provider_resolution_must_not_run)
+    calls = {
+        "check_configuration": {},
+        "list_capabilities": {"include_descriptors": False},
+        "get_endpoint_coverage": {"limit": 1},
+        "get_tool_usage": {"tool_name": "drive_list_files"},
+        "find_tools": {"query": "drive search files"},
+    }
+    client = TestClient(_minimal_ok_app())
+    try:
+        for request_id, (name, arguments) in enumerate(calls.items(), start=30):
+            response = client.post(
+                "/mcp",
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "X-MADPANDA-PORTAL-GRANT": "test-portal-grant",
+                },
+                json={
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments},
+                },
+            )
+            assert response.status_code == 200, (name, response.text)
+            assert response.json()["ok"] is True, (name, response.text)
+    finally:
+        client.close()
+
+
+def test_legacy_navigation_provider_tools_and_protocol_calls_still_require_byok():
+    payloads = [
+        {
+            "jsonrpc": "2.0",
+            "id": 40,
+            "method": "tools/call",
+            "params": {
+                "name": "google_mcp_list_capabilities",
+                "arguments": {},
+            },
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 41,
+            "method": "tools/call",
+            "params": {"name": "drive_list_files", "arguments": {}},
+        },
+        {"jsonrpc": "2.0", "id": 42, "method": "tools/list", "params": {}},
+        {
+            "jsonrpc": "2.0",
+            "id": 43,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "1"},
+            },
+        },
+    ]
+    client = TestClient(_minimal_ok_app())
+    try:
+        for payload in payloads:
+            response = client.post(
+                "/mcp",
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "X-MADPANDA-PORTAL-GRANT": "test-portal-grant",
+                },
+                json=payload,
+            )
+            assert response.status_code == 401
+            assert "x-google-client-id" in response.json()["error"]["message"]
+    finally:
+        client.close()
 
 
 def test_partial_byok_headers_are_rejected():

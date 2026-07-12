@@ -33,10 +33,17 @@ Required request headers for hosted mode:
   - `Accept: text/event-stream` (GET stream)
 - MAD MCP Portal access gate:
   - `X-MADPANDA-PORTAL-GRANT`
-- BYOK credential headers (required on every `/mcp` request):
+- BYOK credential headers (required for protocol discovery and provider tools):
   - `X-Google-Client-Id`
   - `X-Google-Client-Secret`
   - `X-Google-Refresh-Token`
+
+The Portal grant is validated before any MCP JSON body is parsed. The five local
+navigation tools `check_configuration`, `list_capabilities`,
+`get_endpoint_coverage`, `get_tool_usage`, and `find_tools` require only the
+valid Portal grant; they never contact Google. `initialize`, `tools/list`, all
+legacy navigation tools, and every provider operation still require all Google
+BYOK headers.
 
 ## Setup
 
@@ -93,6 +100,7 @@ Edit `fastmcp/.env` if you want to override defaults:
 ```
 MCP_HTTP_PORT=8086
 MCP_BIND_ADDRESS=0.0.0.0
+MCP_BUILD_SHA=<full source commit SHA>
 MCP_PORTAL_GRANT_TOKEN=...
 MCP_PORTAL_GRANT_HEADER=x-madpanda-portal-grant
 GOOGLE_CREDENTIALS_PATH=fastmcp/.google/credentials.json
@@ -150,11 +158,9 @@ In n8n:
    - `X-Google-Client-Secret`
    - `X-Google-Refresh-Token`
 
-If you are connecting from outside Docker, use:
-
-```
-http://<vps-ip>:8086/mcp
-```
+External callers use the canonical HTTPS endpoint. The hardened production
+Compose service exposes port 8086 only inside `mcp-network`; it no longer binds
+that port on the VPS host.
 
 ### VPS notes (Ubuntu/Debian)
 
@@ -168,13 +174,14 @@ Then create the virtual environment as shown above.
 
 ## Tools (curated)
 
-The live catalog is intentionally large. Start with:
+The live catalog contains 150 native tools. Start with the five standard local
+navigation tools:
 
-- `google_mcp_welcome`
-- `google_mcp_list_capabilities`
-- `google_mcp_get_endpoint_coverage`
-- `google_mcp_get_tool_usage`
-- `mcp_health_check`
+- `check_configuration`
+- `list_capabilities`
+- `get_endpoint_coverage`
+- `get_tool_usage`
+- `find_tools`
 
 Provider categories include Drive, Docs, Sheets, Slides, Gmail, Calendar,
 YouTube, Analytics, Search Console, Google Business Profile, Maps Platform,
@@ -183,10 +190,24 @@ raw catalog into an agent context.
 
 ## Agent navigation
 
-Start with `google_mcp_welcome`, then use `google_mcp_list_capabilities` for
-provider-native categories, `google_mcp_get_tool_usage` for one tool, and
-`google_mcp_get_endpoint_coverage` for the Google REST parity matrix. These
-tools keep discovery compact so agents do not need to dump the full raw catalog.
+Start with `find_tools` for a task-ranked shortlist, then call
+`get_tool_usage` for the complete lossless descriptor. Call
+`list_capabilities(include_descriptors=true)` only when publishing or auditing
+the full provider-owned ToolManifest. `get_endpoint_coverage` reports REST
+coverage, and `check_configuration` reports setup without exposing credentials.
+
+Catalog version `google-2026.07.12.1` classifies 144 tools as `agent_ready`, five
+compatibility tools as `legacy`, and the open-ended `google_raw_request` as
+`hidden`. Legacy and hidden tools remain available through advanced broker
+profiles but are not returned by default discovery. Every descriptor includes
+complete input/output schemas, explicit risk/idempotency/open-world annotations,
+documentation and navigation metadata, a deterministic descriptor hash, and an
+out-of-band confirmation phrase for destructive execution.
+
+`/health` preserves `ok`, `service`, `version`, `tool_count`, `tools.total`, and
+configuration fields while also reporting status, full build SHA, catalog
+version, descriptor hash, raw/exposed/agent-ready/documented counts, and safe
+configuration readiness.
 
 ## Pagination
 
