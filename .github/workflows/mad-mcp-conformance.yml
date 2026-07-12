@@ -1,0 +1,39 @@
+name: MAD MCP conformance
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_runtime_checks:
+        description: Check the deployed health and Portal grant boundary.
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    uses: MADPANDA3D/MADPANDA-MAIN-SITE/.github/workflows/mcp-provider-conformance.yml@main
+    with:
+      service_id: google
+      runtime: python
+      install_command: python -m pip install -r fastmcp/requirements.txt pytest pytest-asyncio
+      test_command: PYTHONPATH=fastmcp python -m pytest -q -p no:cacheprovider fastmcp/tests
+      manifest_command: PYTHONPATH=fastmcp python -m pytest -q -p no:cacheprovider fastmcp/tests/test_tool_manifest.py
+      manifest_paths: |
+        fastmcp/tool_manifest.py
+        fastmcp/tests/test_tool_manifest.py
+      compose_file: fastmcp/docker-compose.yaml
+      compose_env_example: fastmcp/.env.example
+      run_runtime_checks: ${{ inputs.run_runtime_checks || false }}
+      runtime_health_url: https://google-mcp.madpanda3d.com/health
+      runtime_mcp_url: https://google-mcp.madpanda3d.com/mcp
+      expected_raw_tool_count: 150
+      expected_exposed_tool_count: 150
+      expected_agent_ready_tool_count: 144
+    secrets:
+      portal_grant_token: ${{ secrets.MAD_MCP_CI_PORTAL_GRANT }}
