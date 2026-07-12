@@ -11,6 +11,9 @@ services:
     init: true
     env_file:
       - .env
+    environment:
+      MCP_BUILD_SHA: ${MCP_BUILD_SHA:-unknown}
+      MCP_SERVER_VERSION: ${MCP_BUILD_SHA:-unknown}
     volumes:
       - ./.google:/app/.google:ro
     expose:
