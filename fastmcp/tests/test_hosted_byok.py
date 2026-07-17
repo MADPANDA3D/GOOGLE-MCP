@@ -496,6 +496,20 @@ def test_gmail_plain_message_adds_text_and_html_signature_once():
     assert html_part.get_content().count(gm.GMAIL_SIGNATURE_MARKER) == 1
     assert gm._gmail_message_contains_signature(message, signature) is True
 
+    pre_signed_plain = gm.build_email_message(
+        to="recipient@example.com",
+        subject="Pre-signed plain body",
+        body=(
+            "Hello\n\n"
+            f"{gm._gmail_signature_plain_text(signature.html)}"
+        ),
+        signature=signature,
+    )
+    pre_signed_html = pre_signed_plain.get_body(preferencelist=("html",))
+    assert pre_signed_html is not None
+    assert pre_signed_html.get_content().count(signature.html) == 1
+    assert pre_signed_html.get_content().count(gm.GMAIL_SIGNATURE_MARKER) == 1
+
 
 def test_gmail_html_message_does_not_duplicate_existing_signature():
     signature = _gmail_signature_fixture()

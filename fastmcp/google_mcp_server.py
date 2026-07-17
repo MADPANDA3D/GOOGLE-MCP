@@ -1142,7 +1142,6 @@ def _gmail_message_contains_signature(
 ) -> bool:
     if not signature.html:
         return False
-    requires_html = bool(re.search(r"<img\b", signature.html, flags=re.IGNORECASE))
     visible_parts: list[EmailMessage] = []
     pending = [message]
     while pending:
@@ -1170,11 +1169,6 @@ def _gmail_message_contains_signature(
         if content_type == "text/html":
             if _gmail_html_contains_signature(content, signature.html):
                 return True
-        elif not requires_html and _gmail_plain_contains_signature(
-            content,
-            signature.html,
-        ):
-            return True
     return False
 
 
@@ -1205,12 +1199,12 @@ def build_email_message(
         html_body, _ = _append_gmail_html_signature(body, active_signature)
         message.add_alternative(html_body, subtype="html")
     else:
-        plain_body, signature_added = _append_gmail_plain_signature(
+        plain_body, _ = _append_gmail_plain_signature(
             body,
             active_signature,
         )
         message.set_content(plain_body)
-        if signature_added:
+        if active_signature.html:
             html_body, _ = _append_gmail_html_signature(
                 _plain_email_body_to_html(body),
                 active_signature,
