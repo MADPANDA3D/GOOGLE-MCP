@@ -1,6 +1,6 @@
 # Google MCP ToolManifest
 
-Catalog version: `google-2026.07.12.1`
+Catalog version: `google-2026.07.17.1`
 
 Schema version: `1.0.0`
 
@@ -22,11 +22,16 @@ truth for the Google MCP catalog. It returns all registered native tools with:
 |---|---:|---|
 | `agent_ready` | 144 | Returned by default discovery. |
 | `legacy` | 5 | Available only when advanced discovery explicitly includes legacy tools. |
-| `hidden` | 1 | `google_raw_request`; available through advanced broker access only. |
+| `hidden` | 2 | `google_raw_request` plus the Portal-only `gmail_signature_preflight`; unavailable in normal discovery. |
 
 The legacy set contains the four prefixed navigation tools and
 `drive_purge_trash`. Existing callers remain compatible. New agents should use
 the five standard navigation tools and `drive_empty_trash`.
+
+`gmail_signature_preflight` returns only the selected send-as alias and
+SHA-256 signature/draft fingerprints. Portal uses those safe values to bind the
+current signature and, for existing drafts, MIME content into preview approval.
+It never returns signature HTML.
 
 ## Safe discovery flow
 

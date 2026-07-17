@@ -16,9 +16,13 @@ import urllib.parse
 import uuid
 from collections import Counter, OrderedDict, defaultdict
 from dataclasses import dataclass
+from email import policy
 from email.message import EmailMessage
+from email.parser import BytesParser
 from email.utils import parseaddr
 from functools import lru_cache
+from html import escape as html_escape
+from html.parser import HTMLParser
 from typing import Any, Callable
 
 from google.auth.transport.requests import AuthorizedSession, Request
@@ -77,6 +81,7 @@ DEFAULT_GMAIL_METADATA_HEADERS = (
     "Message-ID",
 )
 GMAIL_METADATA_BATCH_SIZE = 5
+GMAIL_SIGNATURE_MARKER = "data-madpanda-gmail-signature"
 
 MCP_HTTP_PORT = int(os.getenv("MCP_HTTP_PORT", "8086"))
 MCP_BIND_ADDRESS = os.getenv("MCP_BIND_ADDRESS", "0.0.0.0")
@@ -145,7 +150,7 @@ MCP_BYOK_CLIENT_CACHE_TTL_SECONDS = max(
     float(os.getenv("MCP_BYOK_CLIENT_CACHE_TTL_SECONDS", "900")),
     0.0,
 )
-EXPECTED_TOOL_COUNT = 150
+EXPECTED_TOOL_COUNT = 151
 
 SERVER_START_TIME = time.time()
 SERVER_START_MONO = time.monotonic()
@@ -864,6 +869,315 @@ CellValue = str | int | float | bool | None
 Values = list[list[CellValue]]
 
 
+@dataclass(frozen=True)
+class GmailSendAsSignature:
+    alias: str
+    html: str
+    fingerprint: str
+
+
+class _GmailSignatureTextParser(HTMLParser):
+    _BREAK_TAGS = {
+        "br",
+        "div",
+        "p",
+        "li",
+        "tr",
+        "table",
+        "blockquote",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        del attrs
+        if tag.lower() in self._BREAK_TAGS:
+            self._parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in self._BREAK_TAGS:
+            self._parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        self._parts.append(data)
+
+    def text(self) -> str:
+        lines = [
+            re.sub(r"[ \t]+", " ", line).strip()
+            for line in "".join(self._parts).splitlines()
+        ]
+        return "\n".join(line for line in lines if line).strip()
+
+
+def _gmail_signature_plain_text(signature_html: str) -> str:
+    if not signature_html.strip():
+        return ""
+    parser = _GmailSignatureTextParser()
+    parser.feed(signature_html)
+    parser.close()
+    return parser.text()
+
+
+def _gmail_signature_fingerprint(signature_html: str) -> str:
+    normalized = signature_html.strip()
+    if not normalized:
+        return ""
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _resolve_gmail_send_as_signature(
+    service: Any,
+    from_alias: str = "",
+) -> GmailSendAsSignature:
+    response = service.users().settings().sendAs().list(userId="me").execute()
+    aliases = response.get("sendAs", []) if isinstance(response, dict) else []
+    aliases = [entry for entry in aliases if isinstance(entry, dict)]
+    requested_email = parseaddr(from_alias)[1].strip().lower()
+
+    selected: dict[str, Any] | None = None
+    if requested_email:
+        selected = next(
+            (
+                entry
+                for entry in aliases
+                if str(entry.get("sendAsEmail", "")).strip().lower()
+                == requested_email
+            ),
+            None,
+        )
+        if selected is None:
+            raise ValueError("from_alias is not a configured Gmail send-as alias.")
+    else:
+        selected = next(
+            (entry for entry in aliases if entry.get("isDefault") is True),
+            None,
+        )
+        selected = selected or next(
+            (entry for entry in aliases if entry.get("isPrimary") is True),
+            None,
+        )
+        selected = selected or (aliases[0] if aliases else None)
+
+    if selected is None:
+        raise ValueError("Gmail did not return a send-as identity for this mailbox.")
+
+    alias = str(selected.get("sendAsEmail", "")).strip()
+    signature_html = str(selected.get("signature", "")).strip()
+    if not signature_html:
+        raise ValueError(
+            "No Gmail signature is configured for the selected send-as identity. "
+            "Configure it in Gmail settings before creating or sending email."
+        )
+    return GmailSendAsSignature(
+        alias=alias,
+        html=signature_html,
+        fingerprint=_gmail_signature_fingerprint(signature_html),
+    )
+
+
+def _normalize_signature_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip().casefold()
+
+
+def _gmail_current_plain_text(body_text: str) -> str:
+    lines = body_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith(">"):
+            return "\n".join(lines[:index]).rstrip()
+        if re.match(r"^On .+\bwrote:\s*$", stripped, flags=re.IGNORECASE):
+            return "\n".join(lines[:index]).rstrip()
+        if re.match(
+            r"^-{2,}\s*(?:Original|Forwarded) Message\s*-{2,}$",
+            stripped,
+            flags=re.IGNORECASE,
+        ):
+            return "\n".join(lines[:index]).rstrip()
+    return body_text
+
+
+def _gmail_html_contains_signature(body_html: str, signature_html: str) -> bool:
+    normalized_signature = signature_html.strip()
+    if not normalized_signature:
+        return False
+    fingerprint = _gmail_signature_fingerprint(normalized_signature)
+    signature_block = (
+        f'<div {GMAIL_SIGNATURE_MARKER}="{fingerprint[:16]}">'
+        f"{normalized_signature}</div>"
+    )
+    suffix = re.sub(
+        r"(?:</(?:body|html)>\s*)+$",
+        "",
+        body_html.rstrip(),
+        flags=re.IGNORECASE,
+    ).rstrip()
+    return suffix.endswith(signature_block) or suffix.endswith(normalized_signature)
+
+
+def _gmail_plain_contains_signature(body_text: str, signature_html: str) -> bool:
+    signature_text = _normalize_signature_text(
+        _gmail_signature_plain_text(signature_html)
+    )
+    return bool(
+        signature_text
+        and _normalize_signature_text(
+            _gmail_current_plain_text(body_text)
+        ).endswith(signature_text)
+    )
+
+
+def _gmail_signature_html_block(signature: GmailSendAsSignature) -> str:
+    return (
+        f'<div {GMAIL_SIGNATURE_MARKER}="{signature.fingerprint[:16]}">'
+        f"{signature.html}</div>"
+    )
+
+
+def _append_gmail_html_signature(
+    body_html: str,
+    signature: GmailSendAsSignature,
+) -> tuple[str, bool]:
+    if not signature.html or _gmail_html_contains_signature(
+        body_html,
+        signature.html,
+    ):
+        return body_html, False
+    return f"{body_html}<br><br>{_gmail_signature_html_block(signature)}", True
+
+
+def _append_gmail_plain_signature(
+    body_text: str,
+    signature: GmailSendAsSignature,
+) -> tuple[str, bool]:
+    signature_text = _gmail_signature_plain_text(signature.html)
+    if not signature_text or _gmail_plain_contains_signature(
+        body_text,
+        signature.html,
+    ):
+        return body_text, False
+    return f"{body_text.rstrip()}\n\n-- \n{signature_text}\n", True
+
+
+def _plain_email_body_to_html(body: str) -> str:
+    return (
+        html_escape(body)
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\n", "<br>")
+    )
+
+
+def _decode_email_bytes(raw_base64: str) -> bytes:
+    try:
+        padded = raw_base64 + "=" * (-len(raw_base64) % 4)
+        return base64.b64decode(
+            padded.encode("ascii"),
+            altchars=b"-_",
+            validate=True,
+        )
+    except (UnicodeEncodeError, ValueError) as exc:
+        raise ValueError(
+            "raw_base64 must be a valid base64url MIME message."
+        ) from exc
+
+
+def _decode_email_message(raw_base64: str) -> EmailMessage:
+    try:
+        parsed = BytesParser(policy=policy.default).parsebytes(
+            _decode_email_bytes(raw_base64)
+        )
+    except (KeyError, LookupError, UnicodeDecodeError, ValueError) as exc:
+        raise ValueError(
+            "raw_base64 must contain a valid MIME message."
+        ) from exc
+    if not isinstance(parsed, EmailMessage):
+        raise ValueError("raw_base64 must contain a valid MIME message.")
+    return parsed
+
+
+def _gmail_raw_message_fingerprint(raw_base64: str) -> str:
+    return hashlib.sha256(_decode_email_bytes(raw_base64)).hexdigest()
+
+
+def _verify_gmail_signature_fingerprint(
+    signature: GmailSendAsSignature,
+    expected_fingerprint: str = "",
+) -> None:
+    expected = expected_fingerprint.strip().lower()
+    if not expected:
+        return
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise ValueError("expected_signature_fingerprint must be a SHA-256 hex digest.")
+    if not hmac.compare_digest(signature.fingerprint, expected):
+        raise ValueError(
+            "The configured Gmail signature changed after preview. "
+            "Preview the final email again before continuing."
+        )
+
+
+def _verify_gmail_message_fingerprint(
+    raw_base64: str,
+    expected_fingerprint: str = "",
+) -> None:
+    expected = expected_fingerprint.strip().lower()
+    if not expected:
+        return
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise ValueError("expected_message_fingerprint must be a SHA-256 hex digest.")
+    if not hmac.compare_digest(
+        _gmail_raw_message_fingerprint(raw_base64),
+        expected,
+    ):
+        raise ValueError(
+            "The Gmail draft changed after preview. "
+            "Preview the final draft again before sending."
+        )
+
+
+def _gmail_message_contains_signature(
+    message: EmailMessage,
+    signature: GmailSendAsSignature,
+) -> bool:
+    if not signature.html:
+        return False
+    requires_html = bool(re.search(r"<img\b", signature.html, flags=re.IGNORECASE))
+    visible_parts: list[EmailMessage] = []
+    pending = [message]
+    while pending:
+        part = pending.pop()
+        if part is not message and (
+            part.get_content_disposition() == "attachment"
+            or part.get_content_maintype() == "message"
+        ):
+            continue
+        if part.is_multipart():
+            pending.extend(reversed(list(part.iter_parts())))
+            continue
+        visible_parts.append(part)
+
+    for part in visible_parts:
+        content_type = part.get_content_type()
+        if content_type not in {"text/plain", "text/html"}:
+            continue
+        try:
+            content = part.get_content()
+        except (KeyError, LookupError, UnicodeDecodeError):
+            continue
+        if not isinstance(content, str):
+            continue
+        if content_type == "text/html":
+            if _gmail_html_contains_signature(content, signature.html):
+                return True
+        elif not requires_html and _gmail_plain_contains_signature(
+            content,
+            signature.html,
+        ):
+            return True
+    return False
+
+
 def build_email_message(
     to: str,
     subject: str,
@@ -873,6 +1187,7 @@ def build_email_message(
     reply_to: str = "",
     from_alias: str = "",
     is_html: bool = False,
+    signature: GmailSendAsSignature | None = None,
 ) -> EmailMessage:
     message = EmailMessage()
     message["To"] = to
@@ -885,10 +1200,22 @@ def build_email_message(
         message["Reply-To"] = reply_to
     if from_alias:
         message["From"] = from_alias
+    active_signature = signature or GmailSendAsSignature("", "", "")
     if is_html:
-        message.add_alternative(body, subtype="html")
+        html_body, _ = _append_gmail_html_signature(body, active_signature)
+        message.add_alternative(html_body, subtype="html")
     else:
-        message.set_content(body)
+        plain_body, signature_added = _append_gmail_plain_signature(
+            body,
+            active_signature,
+        )
+        message.set_content(plain_body)
+        if signature_added:
+            html_body, _ = _append_gmail_html_signature(
+                _plain_email_body_to_html(body),
+                active_signature,
+            )
+            message.add_alternative(html_body, subtype="html")
     return message
 
 
@@ -1267,6 +1594,7 @@ READ_ONLY_TOOLS = {
     "gmail_batch_get_metadata",
     "gmail_list_threads",
     "gmail_get_thread",
+    "gmail_signature_preflight",
     "calendar_list_calendars",
     "calendar_get_calendar",
     "calendar_list_events",
@@ -1461,21 +1789,30 @@ TOOL_DESCRIPTIONS = {
         "Use this read-only Gmail tool to fetch one thread by ID. It defaults to "
         "metadata to reduce private content exposure."
     ),
+    "gmail_signature_preflight": (
+        "Internal read-only Gmail signature preflight. It returns only the selected "
+        "send-as alias and SHA-256 binding fingerprints, never signature HTML."
+    ),
     "gmail_send_message": (
         "Use this Gmail irreversible send tool only when the user explicitly approves "
-        "sending. It sends a message from the authenticated mailbox."
+        "sending. It sends from the authenticated mailbox and automatically appends "
+        "that send-as identity's configured Gmail signature exactly once; it refuses "
+        "to send when no signature is configured."
     ),
     "gmail_send_raw_message": (
         "Use this Gmail irreversible send tool only for approved raw MIME sends. It "
-        "sends the supplied base64url MIME payload."
+        "preserves the supplied base64url MIME payload and refuses to send when the "
+        "configured Gmail signature is missing. Prefer gmail_send_message."
     ),
     "gmail_create_draft": (
         "Use this Gmail write tool to create a draft instead of sending. Prefer drafts "
-        "when user approval is still needed."
+        "when user approval is still needed. The configured send-as signature is "
+        "included automatically; no unsigned draft is created when it is missing."
     ),
     "gmail_send_draft": (
         "Use this Gmail irreversible send tool only after explicit approval to send an "
-        "existing draft."
+        "existing draft. It refuses to send when the configured Gmail signature is "
+        "missing; update the draft first when needed."
     ),
     "gmail_modify_message_labels": (
         "Use this destructive Gmail tool to add or remove labels from a message. It "
@@ -1648,6 +1985,14 @@ COMMON_PARAMETER_DESCRIPTIONS = {
     "bcc": "Optional BCC recipients.",
     "reply_to": "Optional Reply-To header.",
     "from_alias": "Optional configured Gmail send-as alias.",
+    "expected_signature_fingerprint": (
+        "Portal-generated SHA-256 binding for the configured Gmail signature. "
+        "Leave blank outside the Portal preflight flow."
+    ),
+    "expected_message_fingerprint": (
+        "Portal-generated SHA-256 binding for an existing Gmail draft. "
+        "Leave blank outside the Portal preflight flow."
+    ),
     "is_html": "Set true when email body is HTML.",
     "raw_base64": "Base64url-encoded raw MIME message.",
     "draft_id": "Gmail draft ID.",
@@ -3739,6 +4084,65 @@ async def gmail_get_thread(
 
 
 @mcp.tool()
+async def gmail_signature_preflight(
+    from_alias: str = "",
+    raw_base64: str = "",
+    draft_id: str = "",
+) -> str:
+    """Return safe fingerprints that bind Gmail signature state to Portal preview."""
+
+    def _preflight():
+        if raw_base64 and draft_id:
+            raise ValueError("Provide raw_base64 or draft_id, not both.")
+        service, cached = client.get_service("gmail", "v1")
+        effective_raw = raw_base64
+        if draft_id:
+            draft = (
+                service.users()
+                .drafts()
+                .get(userId="me", id=draft_id, format="raw")
+                .execute()
+            )
+            effective_raw = str(draft.get("message", {}).get("raw", ""))
+            if not effective_raw:
+                raise ValueError("Gmail draft did not include a raw MIME message.")
+
+        effective_alias = from_alias
+        parsed_message: EmailMessage | None = None
+        if effective_raw:
+            parsed_message = _decode_email_message(effective_raw)
+            effective_alias = str(parsed_message.get("From", ""))
+
+        signature = _resolve_gmail_send_as_signature(service, effective_alias)
+        if parsed_message is not None and not _gmail_message_contains_signature(
+            parsed_message,
+            signature,
+        ):
+            raise ValueError(
+                "The Gmail message is missing the configured send-as signature."
+            )
+        return {
+            "signature_alias": signature.alias,
+            "signature_fingerprint": signature.fingerprint,
+            "message_fingerprint": (
+                _gmail_raw_message_fingerprint(effective_raw)
+                if effective_raw
+                else ""
+            ),
+        }, {
+            "cached_service": cached,
+            "signature_present": True,
+        }
+
+    return await run_tool(
+        "gmail",
+        "signature_preflight",
+        _preflight,
+        allow_retry=True,
+    )
+
+
+@mcp.tool()
 async def gmail_send_message(
     to: str,
     subject: str,
@@ -3749,6 +4153,7 @@ async def gmail_send_message(
     from_alias: str = "",
     thread_id: str = "",
     is_html: bool = False,
+    expected_signature_fingerprint: str = "",
 ) -> str:
     """Send a Gmail message with basic headers."""
 
@@ -3760,6 +4165,11 @@ async def gmail_send_message(
         if body is None:
             raise ValueError("body cannot be empty")
         service, cached = client.get_service("gmail", "v1")
+        signature = _resolve_gmail_send_as_signature(service, from_alias)
+        _verify_gmail_signature_fingerprint(
+            signature,
+            expected_signature_fingerprint,
+        )
         message = build_email_message(
             to=to,
             subject=subject,
@@ -3769,30 +4179,59 @@ async def gmail_send_message(
             reply_to=reply_to,
             from_alias=from_alias,
             is_html=is_html,
+            signature=signature,
         )
         raw = encode_email_message(message)
         payload: dict[str, Any] = {"raw": raw}
         if thread_id:
             payload["threadId"] = thread_id
         request = service.users().messages().send(userId="me", body=payload)
-        return request.execute(), {"cached_service": cached}
+        return request.execute(), {
+            "cached_service": cached,
+            "signature_present": bool(signature.html),
+            "signature_alias": signature.alias,
+            "signature_fingerprint": signature.fingerprint,
+        }
 
     return await run_tool("gmail", "send_message", _send, allow_retry=False)
 
 
 @mcp.tool()
-async def gmail_send_raw_message(raw_base64: str, thread_id: str = "") -> str:
+async def gmail_send_raw_message(
+    raw_base64: str,
+    thread_id: str = "",
+    expected_signature_fingerprint: str = "",
+) -> str:
     """Send a Gmail message using a base64url-encoded raw MIME message."""
 
     def _send_raw():
         if not raw_base64:
             raise ValueError("raw_base64 cannot be empty")
         service, cached = client.get_service("gmail", "v1")
+        parsed_message = _decode_email_message(raw_base64)
+        signature = _resolve_gmail_send_as_signature(
+            service,
+            str(parsed_message.get("From", "")),
+        )
+        _verify_gmail_signature_fingerprint(
+            signature,
+            expected_signature_fingerprint,
+        )
+        if not _gmail_message_contains_signature(parsed_message, signature):
+            raise ValueError(
+                "Raw Gmail message is missing the configured send-as signature. "
+                "Use gmail_send_message or include the current signature before sending."
+            )
         payload: dict[str, Any] = {"raw": raw_base64}
         if thread_id:
             payload["threadId"] = thread_id
         request = service.users().messages().send(userId="me", body=payload)
-        return request.execute(), {"cached_service": cached}
+        return request.execute(), {
+            "cached_service": cached,
+            "signature_verified": bool(signature.html),
+            "signature_alias": signature.alias,
+            "signature_fingerprint": signature.fingerprint,
+        }
 
     return await run_tool("gmail", "send_raw_message", _send_raw, allow_retry=False)
 
@@ -3807,6 +4246,7 @@ async def gmail_create_draft(
     reply_to: str = "",
     from_alias: str = "",
     is_html: bool = False,
+    expected_signature_fingerprint: str = "",
 ) -> str:
     """Create a Gmail draft."""
 
@@ -3818,6 +4258,11 @@ async def gmail_create_draft(
         if body is None:
             raise ValueError("body cannot be empty")
         service, cached = client.get_service("gmail", "v1")
+        signature = _resolve_gmail_send_as_signature(service, from_alias)
+        _verify_gmail_signature_fingerprint(
+            signature,
+            expected_signature_fingerprint,
+        )
         message = build_email_message(
             to=to,
             subject=subject,
@@ -3827,27 +4272,69 @@ async def gmail_create_draft(
             reply_to=reply_to,
             from_alias=from_alias,
             is_html=is_html,
+            signature=signature,
         )
         raw = encode_email_message(message)
         request = service.users().drafts().create(
             userId="me",
             body={"message": {"raw": raw}},
         )
-        return request.execute(), {"cached_service": cached}
+        return request.execute(), {
+            "cached_service": cached,
+            "signature_present": bool(signature.html),
+            "signature_alias": signature.alias,
+            "signature_fingerprint": signature.fingerprint,
+        }
 
     return await run_tool("gmail", "create_draft", _create_draft, allow_retry=False)
 
 
 @mcp.tool()
-async def gmail_send_draft(draft_id: str) -> str:
+async def gmail_send_draft(
+    draft_id: str,
+    expected_signature_fingerprint: str = "",
+    expected_message_fingerprint: str = "",
+) -> str:
     """Send an existing Gmail draft."""
 
     def _send_draft():
         if not draft_id:
             raise ValueError("draft_id cannot be empty")
         service, cached = client.get_service("gmail", "v1")
+        draft = (
+            service.users()
+            .drafts()
+            .get(userId="me", id=draft_id, format="raw")
+            .execute()
+        )
+        raw_message = str(draft.get("message", {}).get("raw", ""))
+        if not raw_message:
+            raise ValueError("Gmail draft did not include a raw MIME message.")
+        _verify_gmail_message_fingerprint(
+            raw_message,
+            expected_message_fingerprint,
+        )
+        parsed_message = _decode_email_message(raw_message)
+        signature = _resolve_gmail_send_as_signature(
+            service,
+            str(parsed_message.get("From", "")),
+        )
+        _verify_gmail_signature_fingerprint(
+            signature,
+            expected_signature_fingerprint,
+        )
+        if not _gmail_message_contains_signature(parsed_message, signature):
+            raise ValueError(
+                "Gmail draft is missing the configured send-as signature. "
+                "Update the draft with gmail_update_draft before sending."
+            )
         request = service.users().drafts().send(userId="me", body={"id": draft_id})
-        return request.execute(), {"cached_service": cached}
+        return request.execute(), {
+            "cached_service": cached,
+            "signature_verified": bool(signature.html),
+            "signature_alias": signature.alias,
+            "signature_fingerprint": signature.fingerprint,
+        }
 
     return await run_tool("gmail", "send_draft", _send_draft, allow_retry=False)
 
@@ -4017,8 +4504,9 @@ async def gmail_update_draft(
     reply_to: str = "",
     from_alias: str = "",
     is_html: bool = False,
+    expected_signature_fingerprint: str = "",
 ) -> str:
-    """Replace an existing Gmail draft message."""
+    """Replace a Gmail draft and include its configured send-as signature."""
 
     def _update_draft():
         if not draft_id:
@@ -4028,6 +4516,11 @@ async def gmail_update_draft(
         if not subject:
             raise ValueError("subject cannot be empty")
         service, cached = client.get_service("gmail", "v1")
+        signature = _resolve_gmail_send_as_signature(service, from_alias)
+        _verify_gmail_signature_fingerprint(
+            signature,
+            expected_signature_fingerprint,
+        )
         message = build_email_message(
             to=to,
             subject=subject,
@@ -4037,13 +4530,19 @@ async def gmail_update_draft(
             reply_to=reply_to,
             from_alias=from_alias,
             is_html=is_html,
+            signature=signature,
         )
         request = service.users().drafts().update(
             userId="me",
             id=draft_id,
             body={"id": draft_id, "message": {"raw": encode_email_message(message)}},
         )
-        return request.execute(), {"cached_service": cached}
+        return request.execute(), {
+            "cached_service": cached,
+            "signature_present": bool(signature.html),
+            "signature_alias": signature.alias,
+            "signature_fingerprint": signature.fingerprint,
+        }
 
     return await run_tool("gmail", "update_draft", _update_draft, allow_retry=False)
 

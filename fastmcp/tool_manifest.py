@@ -10,7 +10,7 @@ from typing import Any, Mapping
 
 SCHEMA_VERSION = "1.0.0"
 SERVICE_ID = "google"
-CATALOG_VERSION = "google-2026.07.12.2"
+CATALOG_VERSION = "google-2026.07.17.1"
 DOCUMENTATION_URL = "https://github.com/MADPANDA3D/GOOGLE-MCP#readme"
 
 STANDARD_NAVIGATION_TOOLS = frozenset(
@@ -40,7 +40,7 @@ LEGACY_TOOLS = frozenset(
         "google_mcp_get_tool_usage",
     }
 )
-HIDDEN_TOOLS = frozenset({"google_raw_request"})
+HIDDEN_TOOLS = frozenset({"google_raw_request", "gmail_signature_preflight"})
 
 ALIASES: dict[str, tuple[str, ...]] = {
     "check_configuration": ("google_configuration_status",),

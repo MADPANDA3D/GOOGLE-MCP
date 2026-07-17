@@ -5,7 +5,7 @@ Service: Google MCP (`google-mcp`)
 Implementation: Python FastMCP, Google API client library plus bounded raw REST escape hatch
 
 ToolManifest conformance verified: 2026-07-12. The provider-owned catalog maps
-all 150 registered native tools to a versioned descriptor. Endpoint inventory
+all 151 registered native tools to a versioned descriptor. Endpoint inventory
 source retrieval remains 2026-04-29 because this hardening pass did not expand
 or claim new provider endpoint coverage.
 

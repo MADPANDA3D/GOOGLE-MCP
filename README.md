@@ -174,8 +174,9 @@ Then create the virtual environment as shown above.
 
 ## Tools (curated)
 
-The live catalog contains 150 native tools. Start with the five standard local
-navigation tools:
+The live catalog contains 151 native tools: 144 agent-ready tools, five legacy
+compatibility tools, and two hidden internal/advanced tools. Start with the five
+standard local navigation tools:
 
 - `check_configuration`
 - `list_capabilities`
@@ -196,9 +197,10 @@ Start with `find_tools` for a task-ranked shortlist, then call
 the full provider-owned ToolManifest. `get_endpoint_coverage` reports REST
 coverage, and `check_configuration` reports setup without exposing credentials.
 
-Catalog version `google-2026.07.12.2` classifies 144 tools as `agent_ready`, five
-compatibility tools as `legacy`, and the open-ended `google_raw_request` as
-`hidden`. Legacy and hidden tools remain available through advanced broker
+Catalog version `google-2026.07.17.1` classifies 144 tools as `agent_ready`, five
+compatibility tools as `legacy`, and two tools as `hidden`: the open-ended
+`google_raw_request` plus the Portal-only Gmail signature preflight. Legacy and
+hidden tools remain available through advanced broker
 profiles but are not returned by default discovery. Every descriptor includes
 complete input/output schemas, explicit risk/idempotency/open-world annotations,
 documentation and navigation metadata, a deterministic descriptor hash, and an
@@ -214,6 +216,21 @@ configuration readiness.
 List/search tools accept `page_token` and return `nextPageToken` in the response (also echoed as `meta.next_page_token`).
 
 Agents should prefer `meta.next_page_token` for paging; `data.nextPageToken` remains for compatibility.
+
+## Gmail signatures
+
+Normal Gmail sends and draft create/update operations resolve the selected
+Gmail send-as identity and append its configured Gmail signature exactly once.
+Hosted signature images are preserved in the HTML alternative, with a text
+fallback for plain-text clients. Raw MIME and existing-draft sends are preserved
+byte-for-byte and fail before delivery when the current configured signature is
+missing. If the selected Gmail identity has no signature configured, the MCP
+refuses to create or send unsigned email.
+
+Portal previews bind the current signature fingerprint into the approved call.
+If the signature changes before execution, the call fails before provider
+mutation and must be previewed again. Existing-draft sends also bind the draft
+MIME fingerprint so edits after preview invalidate approval.
 
 ## Large Drive uploads
 

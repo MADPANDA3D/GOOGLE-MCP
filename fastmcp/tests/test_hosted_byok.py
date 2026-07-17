@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from starlette.testclient import TestClient
 
 os.environ.setdefault("MCP_PORTAL_GRANT_TOKEN", "test-portal-grant")
@@ -286,7 +287,7 @@ def test_tools_list_succeeds_with_valid_byok_headers():
         capabilities.json()["result"]["content"][0]["text"]
     )
     assert capability_result["serviceId"] == "google"
-    assert capability_result["counts"]["raw"] == 150
+    assert capability_result["counts"]["raw"] == 151
     payload = response.json()
     assert response.status_code == 200
     assert "result" in payload
@@ -386,6 +387,403 @@ def test_gmail_sender_key_prefers_list_id_then_domain():
 
     sender = gm._gmail_sender_key({"from": "Noise <promo@example.org>"})
     assert sender["key"] == "example.org"
+
+
+def _gmail_signature_fixture() -> gm.GmailSendAsSignature:
+    signature_html = (
+        '<div>Onward with Purpose,<br>Leo Lara<br>'
+        '<img src="https://cdn.example.com/madpanda.png" alt="MADPANDA3D"></div>'
+    )
+    return gm.GmailSendAsSignature(
+        alias="leo@example.com",
+        html=signature_html,
+        fingerprint=gm._gmail_signature_fingerprint(signature_html),
+    )
+
+
+def test_gmail_send_as_signature_selects_default_and_explicit_alias():
+    class _Request:
+        def execute(self):
+            return {
+                "sendAs": [
+                    {
+                        "sendAsEmail": "other@example.com",
+                        "signature": "<div>Other</div>",
+                        "isPrimary": True,
+                    },
+                    {
+                        "sendAsEmail": "leo@example.com",
+                        "signature": "<div>Leo</div>",
+                        "isDefault": True,
+                    },
+                ]
+            }
+
+    class _Service:
+        def users(self):
+            return self
+
+        def settings(self):
+            return self
+
+        def sendAs(self):
+            return self
+
+        def list(self, **kwargs):
+            assert kwargs == {"userId": "me"}
+            return _Request()
+
+    default_signature = gm._resolve_gmail_send_as_signature(_Service())
+    explicit_signature = gm._resolve_gmail_send_as_signature(
+        _Service(),
+        "Other Sender <other@example.com>",
+    )
+
+    assert default_signature.alias == "leo@example.com"
+    assert default_signature.html == "<div>Leo</div>"
+    assert explicit_signature.alias == "other@example.com"
+    assert explicit_signature.html == "<div>Other</div>"
+
+
+def test_gmail_send_as_signature_fails_when_selected_alias_is_unsigned():
+    class _Request:
+        def execute(self):
+            return {
+                "sendAs": [
+                    {
+                        "sendAsEmail": "leo@example.com",
+                        "signature": "",
+                        "isDefault": True,
+                    }
+                ]
+            }
+
+    class _Service:
+        def users(self):
+            return self
+
+        def settings(self):
+            return self
+
+        def sendAs(self):
+            return self
+
+        def list(self, **kwargs):
+            assert kwargs == {"userId": "me"}
+            return _Request()
+
+    with pytest.raises(ValueError, match="No Gmail signature is configured"):
+        gm._resolve_gmail_send_as_signature(_Service())
+
+
+def test_gmail_plain_message_adds_text_and_html_signature_once():
+    signature = _gmail_signature_fixture()
+    message = gm.build_email_message(
+        to="recipient@example.com",
+        subject="Signed message",
+        body="Hello <team>\nSecond line",
+        signature=signature,
+    )
+
+    plain_part = message.get_body(preferencelist=("plain",))
+    html_part = message.get_body(preferencelist=("html",))
+
+    assert plain_part is not None
+    assert html_part is not None
+    assert "Onward with Purpose" in plain_part.get_content()
+    assert "Hello &lt;team&gt;<br>Second line" in html_part.get_content()
+    assert "https://cdn.example.com/madpanda.png" in html_part.get_content()
+    assert html_part.get_content().count(gm.GMAIL_SIGNATURE_MARKER) == 1
+    assert gm._gmail_message_contains_signature(message, signature) is True
+
+
+def test_gmail_html_message_does_not_duplicate_existing_signature():
+    signature = _gmail_signature_fixture()
+    message = gm.build_email_message(
+        to="recipient@example.com",
+        subject="Already signed",
+        body=f"<p>Hello</p>{signature.html}",
+        is_html=True,
+        signature=signature,
+    )
+    html_part = message.get_body(preferencelist=("html",))
+
+    assert html_part is not None
+    assert html_part.get_content().count(signature.html) == 1
+    assert html_part.get_content().count(gm.GMAIL_SIGNATURE_MARKER) == 0
+    assert gm._gmail_message_contains_signature(message, signature) is True
+
+    quoted_history = gm.build_email_message(
+        to="recipient@example.com",
+        subject="Reply",
+        body=(
+            f"<blockquote>{signature.html}</blockquote>"
+            "<p>Current reply follows quoted history.</p>"
+        ),
+        is_html=True,
+        signature=signature,
+    )
+    quoted_html = quoted_history.get_body(preferencelist=("html",))
+    assert quoted_html is not None
+    assert quoted_html.get_content().count(signature.html) == 2
+
+
+def test_gmail_signature_detection_rejects_marker_only_and_mid_body_text():
+    signature = _gmail_signature_fixture()
+    marker_only = gm.build_email_message(
+        to="recipient@example.com",
+        subject="Forged marker",
+        body=(
+            f'<p>Hello</p><div {gm.GMAIL_SIGNATURE_MARKER}="'
+            f'{signature.fingerprint[:16]}"></div>'
+        ),
+        is_html=True,
+    )
+    short_html = "<div>Thanks</div>"
+    short_signature = gm.GmailSendAsSignature(
+        alias="leo@example.com",
+        html=short_html,
+        fingerprint=gm._gmail_signature_fingerprint(short_html),
+    )
+    mid_body_text = gm.build_email_message(
+        to="recipient@example.com",
+        subject="Body mention",
+        body="Thanks for the update. More details follow.",
+    )
+
+    assert gm._gmail_message_contains_signature(marker_only, signature) is False
+    assert (
+        gm._gmail_message_contains_signature(mid_body_text, short_signature)
+        is False
+    )
+
+
+def test_gmail_raw_message_signature_verification_fails_closed():
+    signature = _gmail_signature_fixture()
+    unsigned = gm.build_email_message(
+        to="recipient@example.com",
+        subject="Unsigned",
+        body="No signature here",
+    )
+    signed = gm.build_email_message(
+        to="recipient@example.com",
+        subject="Signed",
+        body="Signature follows",
+        signature=signature,
+    )
+
+    assert gm._gmail_message_contains_signature(unsigned, signature) is False
+    assert gm._gmail_message_contains_signature(signed, signature) is True
+    assert gm._gmail_message_contains_signature(
+        gm._decode_email_message(gm.encode_email_message(signed)),
+        signature,
+    ) is True
+    text_only_copy = gm.build_email_message(
+        to="recipient@example.com",
+        subject="Missing logo",
+        body=gm._gmail_signature_plain_text(signature.html),
+    )
+    assert gm._gmail_message_contains_signature(text_only_copy, signature) is False
+
+
+def test_gmail_signature_detection_ignores_attached_messages_and_quoted_history():
+    signature = _gmail_signature_fixture()
+    attached_signed_message = gm.build_email_message(
+        to="recipient@example.com",
+        subject="Attached signed message",
+        body="Signed attachment",
+        signature=signature,
+    )
+    unsigned_outer = gm.build_email_message(
+        to="recipient@example.com",
+        subject="Unsigned outer message",
+        body="The attached message is signed, but this one is not.",
+    )
+    unsigned_outer.add_attachment(attached_signed_message)
+    assert (
+        gm._gmail_message_contains_signature(unsigned_outer, signature)
+        is False
+    )
+
+    text_signature_html = "<div>Thanks,<br>Leo</div>"
+    text_signature = gm.GmailSendAsSignature(
+        alias="leo@example.com",
+        html=text_signature_html,
+        fingerprint=gm._gmail_signature_fingerprint(text_signature_html),
+    )
+    quoted_history = (
+        "Current reply\n\n"
+        "On Fri, Jul 17, 2026, Gordon wrote:\n"
+        "Older message\n\n-- \nThanks,\nLeo"
+    )
+    reply = gm.build_email_message(
+        to="recipient@example.com",
+        subject="Reply",
+        body=quoted_history,
+        signature=text_signature,
+    )
+    reply_html = reply.get_body(preferencelist=("html",))
+    assert reply_html is not None
+    assert gm.GMAIL_SIGNATURE_MARKER in reply_html.get_content()
+    assert gm._gmail_message_contains_signature(reply, text_signature) is True
+
+
+def test_gmail_send_message_uses_configured_signature_before_provider_send():
+    captured = {}
+    signature_html = _gmail_signature_fixture().html
+
+    class _Request:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def execute(self):
+            return self.payload
+
+    class _Service:
+        def users(self):
+            return self
+
+        def settings(self):
+            return self
+
+        def sendAs(self):
+            return self
+
+        def list(self, **kwargs):
+            assert kwargs == {"userId": "me"}
+            return _Request(
+                {
+                    "sendAs": [
+                        {
+                            "sendAsEmail": "leo@example.com",
+                            "signature": signature_html,
+                            "isDefault": True,
+                        }
+                    ]
+                }
+            )
+
+        def messages(self):
+            return self
+
+        def send(self, **kwargs):
+            captured.update(kwargs)
+            return _Request({"id": "message-1"})
+
+    class _Client:
+        def get_service(self, api_name, api_version):
+            assert (api_name, api_version) == ("gmail", "v1")
+            return _Service(), False
+
+        def is_session_cached(self):
+            return False
+
+    token = gm.ACTIVE_GOOGLE_CLIENT.set(_Client())
+    try:
+        result = json.loads(
+            asyncio.run(
+                gm.gmail_send_message(
+                    to="recipient@example.com",
+                    subject="Signed",
+                    body="Hello",
+                )
+            )
+        )
+    finally:
+        gm.ACTIVE_GOOGLE_CLIENT.reset(token)
+
+    sent_message = gm._decode_email_message(captured["body"]["raw"])
+    html_part = sent_message.get_body(preferencelist=("html",))
+    assert captured["userId"] == "me"
+    assert html_part is not None
+    assert signature_html in html_part.get_content()
+    assert result["ok"] is True
+    assert result["meta"]["signature_present"] is True
+    assert result["meta"]["signature_alias"] == "leo@example.com"
+
+
+def test_gmail_signature_preflight_returns_only_safe_binding_metadata():
+    signature_html = _gmail_signature_fixture().html
+
+    class _Request:
+        def execute(self):
+            return {
+                "sendAs": [
+                    {
+                        "sendAsEmail": "leo@example.com",
+                        "signature": signature_html,
+                        "isDefault": True,
+                    }
+                ]
+            }
+
+    class _Service:
+        def users(self):
+            return self
+
+        def settings(self):
+            return self
+
+        def sendAs(self):
+            return self
+
+        def list(self, **kwargs):
+            assert kwargs == {"userId": "me"}
+            return _Request()
+
+    class _Client:
+        def get_service(self, api_name, api_version):
+            assert (api_name, api_version) == ("gmail", "v1")
+            return _Service(), False
+
+        def is_session_cached(self):
+            return False
+
+    token = gm.ACTIVE_GOOGLE_CLIENT.set(_Client())
+    try:
+        result = json.loads(
+            asyncio.run(
+                gm.gmail_signature_preflight(from_alias="leo@example.com")
+            )
+        )
+    finally:
+        gm.ACTIVE_GOOGLE_CLIENT.reset(token)
+
+    serialized = json.dumps(result)
+    assert result["ok"] is True
+    assert result["data"]["signature_alias"] == "leo@example.com"
+    assert len(result["data"]["signature_fingerprint"]) == 64
+    assert result["data"]["message_fingerprint"] == ""
+    assert signature_html not in serialized
+    assert "cdn.example.com" not in serialized
+
+
+def test_gmail_signature_fingerprint_binding_fails_when_signature_changes():
+    signature = _gmail_signature_fixture()
+
+    gm._verify_gmail_signature_fingerprint(signature, signature.fingerprint)
+    with pytest.raises(ValueError, match="changed after preview"):
+        gm._verify_gmail_signature_fingerprint(signature, "0" * 64)
+
+
+def test_gmail_message_fingerprint_binding_fails_when_draft_changes():
+    original = gm.build_email_message(
+        to="recipient@example.com",
+        subject="Original",
+        body="Original body",
+    )
+    changed = gm.build_email_message(
+        to="recipient@example.com",
+        subject="Changed",
+        body="Changed body",
+    )
+    original_raw = gm.encode_email_message(original)
+    changed_raw = gm.encode_email_message(changed)
+    fingerprint = gm._gmail_raw_message_fingerprint(original_raw)
+
+    gm._verify_gmail_message_fingerprint(original_raw, fingerprint)
+    with pytest.raises(ValueError, match="draft changed after preview"):
+        gm._verify_gmail_message_fingerprint(changed_raw, fingerprint)
 
 
 def test_gmail_mailbox_overview_caps_labels(monkeypatch):

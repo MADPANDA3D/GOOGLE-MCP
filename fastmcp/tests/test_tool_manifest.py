@@ -25,12 +25,12 @@ def test_provider_manifest_is_complete_deterministic_and_lossless():
     assert manifest["serviceId"] == "google"
     assert manifest["catalogVersion"] == CATALOG_VERSION
     assert manifest["counts"] == {
-        "raw": 150,
+        "raw": 151,
         "agentReady": 144,
         "legacy": 5,
-        "hidden": 1,
+        "hidden": 2,
     }
-    assert len(manifest["tools"]) == 150
+    assert len(manifest["tools"]) == 151
     assert manifest["descriptorHash"] == _canonical_hash(manifest["tools"])
     assert STANDARD_NAVIGATION_TOOLS <= {
         item["nativeToolName"] for item in manifest["tools"]
@@ -82,6 +82,8 @@ def test_manifest_preserves_legacy_and_advanced_contract_tiers():
     by_name = {item["nativeToolName"]: item for item in manifest["tools"]}
 
     assert by_name["google_raw_request"]["tier"] == "hidden"
+    assert by_name["gmail_signature_preflight"]["tier"] == "hidden"
+    assert by_name["gmail_signature_preflight"]["annotations"]["readOnlyHint"] is True
     assert by_name["drive_purge_trash"]["tier"] == "legacy"
     assert by_name["drive_purge_trash"]["deprecation"]["replacement"] == (
         "drive_empty_trash"
@@ -92,11 +94,11 @@ def test_manifest_preserves_legacy_and_advanced_contract_tiers():
 
 def test_list_capabilities_returns_counts_or_complete_descriptors():
     counts_only = json.loads(asyncio.run(gm.list_capabilities(False)))
-    assert counts_only["counts"]["raw"] == 150
+    assert counts_only["counts"]["raw"] == 151
     assert counts_only["tools"] == []
 
     complete = json.loads(asyncio.run(gm.list_capabilities(True)))
-    assert len(complete["tools"]) == 150
+    assert len(complete["tools"]) == 151
     assert complete["descriptorHash"] == _canonical_hash(complete["tools"])
 
 
@@ -147,11 +149,11 @@ def test_health_reports_catalog_build_and_contract_counts():
     assert response.status_code == 200
     assert payload["ok"] is True
     assert payload["status"] == "healthy"
-    assert payload["tool_count"] == 150
-    assert payload["raw_tool_count"] == 150
-    assert payload["exposed_tool_count"] == 150
+    assert payload["tool_count"] == 151
+    assert payload["raw_tool_count"] == 151
+    assert payload["exposed_tool_count"] == 151
     assert payload["agent_ready_tool_count"] == 144
-    assert payload["documented_tool_count"] == 150
+    assert payload["documented_tool_count"] == 151
     assert payload["catalog_version"] == CATALOG_VERSION
     assert len(payload["descriptor_hash"]) == 64
     assert payload["configuration"]["ready"] is True

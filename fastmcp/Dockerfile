@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
 ARG MCP_BUILD_SHA=unknown
-ARG MCP_IMAGE_VERSION=google-2026.07.12.2
+ARG MCP_IMAGE_VERSION=google-2026.07.17.1
 
 LABEL org.opencontainers.image.title="MADPANDA Google MCP" \
       org.opencontainers.image.description="Agent-ready Google Workspace MCP provider" \
