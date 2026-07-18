@@ -1,6 +1,7 @@
 name: CodeQL
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
@@ -19,6 +20,10 @@ concurrency:
 jobs:
   analyze:
     name: Python security analysis
+    # CodeQL is supported for public repositories. This clean-staging repository
+    # stays private until every publication gate passes, so the job activates
+    # automatically only after the canonical repository becomes public.
+    if: github.event.repository.visibility == 'public'
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
@@ -46,7 +51,3 @@ jobs:
         uses: github/codeql-action/analyze@7188fc363630916deb702c7fdcf4e481b751f97a # v4
         with:
           category: /language:python
-          # Private clean-staging repositories without GitHub Advanced Security
-          # still execute CodeQL locally. The canonical public repository uploads
-          # the same SARIF to code scanning.
-          upload: ${{ github.event.repository.visibility == 'public' && 'always' || 'never' }}
