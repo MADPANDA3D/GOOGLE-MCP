@@ -1,0 +1,239 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: ghcr.io/madpanda3d/google-mcp-server
+  GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks@sha256:b109bc5f8f76a38196a3e413704fc5b9e3c32360bce4e4b603bd6f45b3721dbb
+  UV_VERSION: 0.11.29
+
+jobs:
+  publish:
+    name: Verify and publish exact tag
+    runs-on: ubuntu-24.04
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+      packages: write
+    steps:
+      - name: Check out exact tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.ref }}
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: 3.12.13
+      - name: Set up uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Verify exact stable tag and package version
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          RELEASE_SHA=$(git rev-parse HEAD)
+          TAG_SHA=$(git rev-list -n 1 "refs/tags/$GITHUB_REF_NAME")
+          test "$RELEASE_SHA" = "$TAG_SHA"
+          test "$RELEASE_SHA" = "$GITHUB_SHA"
+          PACKAGE_VERSION=$(python - <<'PY'
+          import tomllib
+          with open('pyproject.toml', 'rb') as handle:
+              print(tomllib.load(handle)['project']['version'])
+          PY
+          )
+          test "${GITHUB_REF_NAME#v}" = "$PACKAGE_VERSION"
+      - name: Verify tagged source, package, and dependencies
+        run: |
+          uv sync --frozen --group dev
+          uv run pytest -q -p no:cacheprovider
+          uv run ruff check .
+          uv run ruff format --check .
+          uv run isort --check-only fastmcp scripts
+          uv run mypy
+          uv run python scripts/check_source_safety.py
+          uv run bandit -q -r fastmcp -x fastmcp/tests -lll
+          uv run pip-audit -r requirements.lock
+          uv build
+          uv run twine check dist/*
+          python -m venv /tmp/google-wheel-venv
+          /tmp/google-wheel-venv/bin/python -m pip install \
+            --disable-pip-version-check \
+            --require-hashes \
+            --requirement requirements.lock
+          /tmp/google-wheel-venv/bin/python -m pip install \
+            --disable-pip-version-check \
+            --no-deps \
+            dist/*.whl
+          RELEASE_VERSION="${GITHUB_REF_NAME#v}" /tmp/google-wheel-venv/bin/python - <<'PY'
+          import os
+          from importlib.metadata import version
+          import google_mcp_server
+          assert version('madpanda-google-mcp') == os.environ['RELEASE_VERSION']
+          assert google_mcp_server.registered_tool_count() == google_mcp_server.EXPECTED_TOOL_COUNT
+          PY
+      - name: Scan exact tag history with Gitleaks
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" \
+            --volume "$PWD:/repo:ro" --workdir /repo \
+            "$GITLEAKS_IMAGE" git --redact --verbose --no-banner .
+      - name: Validate workflow syntax and semantics
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          curl --fail --location --silent --show-error \
+            --output /tmp/actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  /tmp/actionlint.tar.gz" | sha256sum --check --strict
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          /tmp/actionlint
+      - name: Scan source configuration and secrets with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.72.0
+          scan-type: fs
+          scan-ref: .
+          scanners: misconfig,secret
+          format: table
+          exit-code: 1
+          severity: HIGH,CRITICAL
+      - name: Attest Python release artifacts
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-path: dist/*
+      - name: Compute exact-source fingerprint
+        id: source
+        run: echo "fingerprint=$(git archive --format=tar HEAD | sha256sum | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+      - name: Build release candidate
+        run: |
+          docker build \
+            --build-arg BUILD_SHA="$GITHUB_SHA" \
+            --build-arg SOURCE_FINGERPRINT="${{ steps.source.outputs.fingerprint }}" \
+            --tag google-mcp:release-candidate \
+            .
+      - name: Scan release candidate with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.72.0
+          image-ref: google-mcp:release-candidate
+          format: table
+          exit-code: 1
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+      - name: Smoke release candidate in both modes
+        run: |
+          bash .github/scripts/smoke-image.sh \
+            google-mcp:release-candidate \
+            "$GITHUB_SHA" \
+            "${{ steps.source.outputs.fingerprint }}" \
+            development
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Compute image tags and labels
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha,format=long,prefix=sha-
+            type=raw,value=latest
+      - name: Publish image with SBOM and provenance
+        id: push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BUILD_SHA=${{ github.sha }}
+            SOURCE_FINGERPRINT=${{ steps.source.outputs.fingerprint }}
+          sbom: true
+          provenance: mode=max
+      - name: Scan exact published digest with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.72.0
+          image-ref: ${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}
+          format: table
+          exit-code: 1
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+      - name: Attest published image
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+      - name: Require anonymous pull access
+        run: |
+          docker logout ghcr.io
+          if ! docker manifest inspect "${IMAGE_NAME}@${{ steps.push.outputs.digest }}" >/dev/null; then
+            echo "::error::The GHCR package is not publicly pullable. A package owner must set the linked package visibility to Public, then rerun this exact tagged workflow."
+            exit 1
+          fi
+          docker pull "${IMAGE_NAME}@${{ steps.push.outputs.digest }}"
+      - name: Smoke the exact anonymously pulled published digest
+        run: |
+          bash .github/scripts/smoke-image.sh \
+            "${IMAGE_NAME}@${{ steps.push.outputs.digest }}" \
+            "$GITHUB_SHA" \
+            "${{ steps.source.outputs.fingerprint }}" \
+            "${IMAGE_NAME}@${{ steps.push.outputs.digest }}"
+      - name: Create GitHub Release with package artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+            gh release view "$GITHUB_REF_NAME" --json body --jq .body \
+              > /tmp/google-mcp-release-notes.md
+            python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          notes_path = Path('/tmp/google-mcp-release-notes.md')
+          notes = notes_path.read_text()
+          digest_line = f"Container: `{os.environ['IMAGE_NAME']}@{os.environ['IMAGE_DIGEST']}`"
+          pattern = r"(?m)^Container: `ghcr\.io/madpanda3d/google-mcp-server@sha256:[0-9a-f]{64}`$"
+          if re.search(pattern, notes):
+              notes = re.sub(pattern, digest_line, notes)
+          else:
+              notes = f"{notes.rstrip()}\n\n{digest_line}\n"
+          notes_path.write_text(notes)
+          PY
+            gh release edit "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --title "MADPANDA Google MCP $GITHUB_REF_NAME" \
+              --notes-file /tmp/google-mcp-release-notes.md \
+              --latest
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --verify-tag \
+              --title "MADPANDA Google MCP $GITHUB_REF_NAME" \
+              --generate-notes \
+              --notes "Container: \`${IMAGE_NAME}@${IMAGE_DIGEST}\`" \
+              --latest
+          fi
