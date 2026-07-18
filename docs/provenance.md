@@ -75,12 +75,14 @@ The release workflow is tag-driven and should:
    version agree.
 2. Re-run source, test, lint, security, dependency, package, Compose, image, and
    provider-free runtime gates from that tag.
-3. Produce wheel and source-archive artifacts and attest them.
+3. Produce wheel and source-archive artifacts plus SHA-256 checksums. Attach
+   GitHub-hosted attestations when the repository is public.
 4. Compute the exact-source fingerprint.
 5. Build and scan the image from that same source.
 6. Smoke both standalone and Portal modes without contacting Google.
 7. Publish the image with SBOM and build provenance.
-8. Scan and attest the immutable published digest.
+8. Scan the immutable published digest and attach a GitHub-hosted attestation
+   when the repository is public.
 9. Log out of GHCR and require an anonymous manifest read and pull of that
    exact digest.
 10. Smoke the anonymously pulled digest in both access modes.
@@ -93,6 +95,15 @@ visibility as irreversible. The workflow does not claim to automate that owner
 decision: it stops before the GitHub Release unless the exact digest is already
 anonymously pullable, and the same tagged workflow must be rerun after the
 visibility change.
+
+GitHub-hosted artifact attestations are not available to user-owned private
+repositories. The private first-release bootstrap therefore records package
+checksums and always publishes the container with BuildKit SBOM and OCI
+provenance, but deliberately skips GitHub's additional attestation API. Once
+the source repository is public, subsequent releases activate both GitHub
+attestation steps automatically. A platform entitlement failure must never be
+worked around by disabling package checksums, SBOM generation, OCI provenance,
+digest scanning, or anonymous-pull verification.
 
 No container digest is asserted in this documentation before those publication
 steps produce it. Operators must obtain the digest from the actual release,
@@ -114,8 +125,8 @@ docker compose -f docker-compose.yml config --quiet
 docker compose -f docker-compose.portal.yml config --quiet
 ```
 
-Package and image attestations are release artifacts; verify them against the
-exact subject digest using the tooling documented by the release platform.
+Verify package checksums and available package or image attestations against
+the exact subject digest using the tooling documented by the release platform.
 
 ## Upstream and trademark statement
 
