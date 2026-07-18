@@ -175,14 +175,6 @@ jobs:
           assert len(matches) == 1
           assert matches[0].value == 'google_mcp_server:main'
           PY
-      - name: Upload verified Python artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: python-package
-          path: dist/*
-          if-no-files-found: error
-          retention-days: 7
-
   image:
     name: Hardened image
     runs-on: ubuntu-24.04
