@@ -170,6 +170,14 @@ jobs:
             SOURCE_FINGERPRINT=${{ steps.source.outputs.fingerprint }}
           sbom: true
           provenance: mode=max
+      - name: Make the linked package publicly pullable
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --method PATCH \
+            /user/packages/container/google-mcp-server \
+            -f visibility=public \
+            --silent
       - name: Scan exact published digest with Trivy
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

@@ -80,8 +80,10 @@ The release workflow is tag-driven and should:
 5. Build and scan the image from that same source.
 6. Smoke both standalone and Portal modes without contacting Google.
 7. Publish the image with SBOM and build provenance.
-8. Scan and attest the immutable published digest.
-9. Record that digest and package artifacts in the matching GitHub Release.
+8. Make the repository-linked container package public, then prove the exact
+   digest can be pulled anonymously.
+9. Scan, attest, and smoke the immutable published digest.
+10. Record that digest and package artifacts in the matching GitHub Release.
 
 No container digest is asserted in this documentation before those publication
 steps produce it. Operators must obtain the digest from the actual release,
