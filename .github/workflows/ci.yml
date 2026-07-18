@@ -1,0 +1,232 @@
+name: Verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks@sha256:b109bc5f8f76a38196a3e413704fc5b9e3c32360bce4e4b603bd6f45b3721dbb
+  UV_VERSION: 0.11.29
+
+jobs:
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out full publishable history
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Scan source and history with Gitleaks
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" \
+            --volume "$PWD:/repo:ro" --workdir /repo \
+            "$GITLEAKS_IMAGE" git --redact --verbose --no-banner .
+      - name: Validate workflow syntax and semantics
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          curl --fail --location --silent --show-error \
+            --output /tmp/actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  /tmp/actionlint.tar.gz" | sha256sum --check --strict
+          tar -xzf /tmp/actionlint.tar.gz -C /tmp actionlint
+          /tmp/actionlint
+
+  source-scan:
+    name: Filesystem policy scan
+    runs-on: ubuntu-24.04
+    needs: secret-scan
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Scan source configuration and secrets with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.72.0
+          scan-type: fs
+          scan-ref: .
+          scanners: misconfig,secret
+          format: table
+          exit-code: 1
+          severity: HIGH,CRITICAL
+
+  test:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-24.04
+    needs: [secret-scan, source-scan]
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12.13', '3.13.11']
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Set up uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install exact locked environment
+        run: uv sync --frozen --group dev
+      - name: Compile package sources
+        run: uv run python -m compileall -q fastmcp scripts
+      - name: Run offline conformance suite
+        run: uv run pytest -q -p no:cacheprovider
+      - name: Catch correctness-level lint failures
+        run: uv run ruff check .
+      - name: Enforce deterministic Python formatting
+        run: uv run ruff format --check .
+      - name: Enforce deterministic import order
+        run: uv run isort --check-only fastmcp scripts
+      - name: Run incremental static type analysis
+        run: uv run mypy
+      - name: Enforce public-source boundary
+        if: matrix.python == '3.12.13'
+        run: uv run python scripts/check_source_safety.py
+      - name: Reject high-severity source findings
+        if: matrix.python == '3.12.13'
+        run: uv run bandit -q -r fastmcp -x fastmcp/tests -lll
+      - name: Audit locked runtime dependencies
+        if: matrix.python == '3.12.13'
+        run: uv run pip-audit -r requirements.lock
+
+  package:
+    name: Python package
+    runs-on: ubuntu-24.04
+    needs: test
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: 3.12.13
+      - name: Set up uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Build wheel and source archive
+        run: |
+          uv sync --frozen --group dev
+          uv build
+          uv run twine check dist/*
+      - name: Verify package version and console entry point
+        run: |
+          test "$(python - <<'PY'
+          import tomllib
+          with open('pyproject.toml', 'rb') as handle:
+              print(tomllib.load(handle)['project']['version'])
+          PY
+          )" = "1.0.0"
+          uv run python - <<'PY'
+          from importlib.metadata import entry_points
+          matches = [
+              item for item in entry_points(group='console_scripts')
+              if item.name == 'madpanda-google-mcp'
+          ]
+          assert len(matches) == 1
+          assert matches[0].value == 'google_mcp_server:main'
+          PY
+      - name: Install and import the exact built wheel in a clean environment
+        run: |
+          python -m venv /tmp/google-wheel-venv
+          /tmp/google-wheel-venv/bin/python -m pip install \
+            --disable-pip-version-check \
+            --require-hashes \
+            --requirement requirements.lock
+          /tmp/google-wheel-venv/bin/python -m pip install \
+            --disable-pip-version-check \
+            --no-deps \
+            dist/*.whl
+          /tmp/google-wheel-venv/bin/python - <<'PY'
+          from importlib.metadata import entry_points, version
+          import google_mcp_server
+          assert version('madpanda-google-mcp') == '1.0.0'
+          assert google_mcp_server.registered_tool_count() == google_mcp_server.EXPECTED_TOOL_COUNT
+          matches = [
+              item for item in entry_points(group='console_scripts')
+              if item.name == 'madpanda-google-mcp'
+          ]
+          assert len(matches) == 1
+          assert matches[0].value == 'google_mcp_server:main'
+          PY
+      - name: Upload verified Python artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: python-package
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  image:
+    name: Hardened image
+    runs-on: ubuntu-24.04
+    needs: [test, package]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Validate standalone and Portal Compose
+        env:
+          MCP_MODE: standalone
+          MCP_ACCESS_TOKEN: ci-standalone-token-000000000000000000000000000000000000000000
+          MCP_PORTAL_GRANT_TOKEN: ci-portal-grant-000000000000000000000000000000000000000000
+          MCP_BUILD_SHA: 0000000000000000000000000000000000000001
+          MCP_SOURCE_FINGERPRINT: 1111111111111111111111111111111111111111111111111111111111111111
+          MCP_RUNTIME_IMAGE: google-mcp:ci
+          MCP_IMAGE_REFERENCE: ghcr.io/madpanda3d/google-mcp-server@sha256:2222222222222222222222222222222222222222222222222222222222222222
+        run: |
+          docker compose -f docker-compose.yml config --quiet
+          docker compose -f docker-compose.portal.yml config --quiet
+      - name: Build exact source
+        id: source
+        run: |
+          SOURCE_FINGERPRINT=$(git archive --format=tar HEAD | sha256sum | awk '{print $1}')
+          echo "fingerprint=$SOURCE_FINGERPRINT" >> "$GITHUB_OUTPUT"
+          docker build \
+            --build-arg BUILD_SHA="$GITHUB_SHA" \
+            --build-arg SOURCE_FINGERPRINT="$SOURCE_FINGERPRINT" \
+            --tag google-mcp:ci \
+            .
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.72.0
+          image-ref: google-mcp:ci
+          format: table
+          exit-code: 1
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+      - name: Smoke Portal and standalone modes without provider calls
+        run: |
+          bash .github/scripts/smoke-image.sh \
+            google-mcp:ci \
+            "$GITHUB_SHA" \
+            "${{ steps.source.outputs.fingerprint }}" \
+            development

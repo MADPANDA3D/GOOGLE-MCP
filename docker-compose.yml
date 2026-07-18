@@ -1,0 +1,69 @@
+name: google-mcp
+
+services:
+  google-mcp:
+    build:
+      context: .
+      args:
+        BUILD_SHA: ${MCP_BUILD_SHA:-development}
+        SOURCE_FINGERPRINT: ${MCP_SOURCE_FINGERPRINT:-development}
+    image: ${MCP_RUNTIME_IMAGE:-google-mcp:local-source}
+    container_name: google-mcp
+    restart: unless-stopped
+    init: true
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 1g
+    cpus: 1.0
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    environment: &google-mcp-environment
+      MCP_HTTP_PORT: 8086
+      MCP_BIND_ADDRESS: 0.0.0.0
+      MCP_MODE: ${MCP_MODE:-standalone}
+      MCP_ACCESS_TOKEN: ${MCP_ACCESS_TOKEN:-}
+      MCP_PORTAL_GRANT_TOKEN: ${MCP_PORTAL_GRANT_TOKEN:-}
+      MCP_PORTAL_GRANT_HEADER: ${MCP_PORTAL_GRANT_HEADER:-x-madpanda-portal-grant}
+      MCP_BUILD_SHA: ${MCP_BUILD_SHA:-development}
+      MCP_SERVER_VERSION: ${MCP_BUILD_SHA:-development}
+      MCP_SOURCE_FINGERPRINT: ${MCP_SOURCE_FINGERPRINT:-development}
+      MCP_IMAGE_REFERENCE: ${MCP_IMAGE_REFERENCE:-development}
+      MCP_EXPECTED_TOOL_COUNT: 151
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-localhost,127.0.0.1,google-mcp}
+      MCP_ALLOWED_ORIGINS: ${MCP_ALLOWED_ORIGINS:-}
+      MCP_REQUEST_BODY_MAX_BYTES: ${MCP_REQUEST_BODY_MAX_BYTES:-8388608}
+      MCP_PROVIDER_RESPONSE_MAX_BYTES: ${MCP_PROVIDER_RESPONSE_MAX_BYTES:-4194304}
+      MCP_TOOL_OUTPUT_MAX_BYTES: ${MCP_TOOL_OUTPUT_MAX_BYTES:-2097152}
+      MCP_MAX_DOWNLOAD_BYTES: ${MCP_MAX_DOWNLOAD_BYTES:-5000000}
+      MCP_MAX_BATCH_ITEMS: ${MCP_MAX_BATCH_ITEMS:-1000}
+      MCP_MAX_PROVIDER_CALLS_PER_TOOL: ${MCP_MAX_PROVIDER_CALLS_PER_TOOL:-128}
+      MCP_ALLOW_REQUEST_OVERRIDES: ${MCP_ALLOW_REQUEST_OVERRIDES:-true}
+      MCP_REQUIRE_REQUEST_GOOGLE_CLIENT_ID: ${MCP_REQUIRE_REQUEST_GOOGLE_CLIENT_ID:-true}
+      MCP_REQUIRE_REQUEST_GOOGLE_CLIENT_SECRET: ${MCP_REQUIRE_REQUEST_GOOGLE_CLIENT_SECRET:-true}
+      MCP_REQUIRE_REQUEST_GOOGLE_REFRESH_TOKEN: ${MCP_REQUIRE_REQUEST_GOOGLE_REFRESH_TOKEN:-true}
+      MCP_DISABLE_DEFAULT_GOOGLE_FALLBACK: ${MCP_DISABLE_DEFAULT_GOOGLE_FALLBACK:-true}
+      MCP_GOOGLE_CLIENT_ID_HEADER: ${MCP_GOOGLE_CLIENT_ID_HEADER:-x-google-client-id}
+      MCP_GOOGLE_CLIENT_SECRET_HEADER: ${MCP_GOOGLE_CLIENT_SECRET_HEADER:-x-google-client-secret}
+      MCP_GOOGLE_REFRESH_TOKEN_HEADER: ${MCP_GOOGLE_REFRESH_TOKEN_HEADER:-x-google-refresh-token}
+      MCP_GOOGLE_MAPS_API_KEY_HEADER: ${MCP_GOOGLE_MAPS_API_KEY_HEADER:-x-google-maps-api-key}
+      MCP_BYOK_CLIENT_CACHE_SIZE: ${MCP_BYOK_CLIENT_CACHE_SIZE:-0}
+      MCP_BYOK_CLIENT_CACHE_TTL_SECONDS: ${MCP_BYOK_CLIENT_CACHE_TTL_SECONDS:-0}
+      MCP_WORKERS: ${MCP_WORKERS:-1}
+      MCP_LOG_REQUESTS: ${MCP_LOG_REQUESTS:-false}
+    ports:
+      - "127.0.0.1:${MCP_HOST_PORT:-8086}:8086"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import json,os,urllib.request; p=json.load(urllib.request.urlopen('http://127.0.0.1:8086/health',timeout=3)); raise SystemExit(0 if p.get('status')=='healthy' and p.get('tool_count')==int(os.environ['MCP_EXPECTED_TOOL_COUNT']) else 1)"
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
