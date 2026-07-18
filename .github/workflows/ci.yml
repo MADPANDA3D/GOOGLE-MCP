@@ -137,12 +137,13 @@ jobs:
           uv run twine check dist/*
       - name: Verify package version and console entry point
         run: |
-          test "$(python - <<'PY'
+          PACKAGE_VERSION="$(python - <<'PY'
           import tomllib
           with open('pyproject.toml', 'rb') as handle:
               print(tomllib.load(handle)['project']['version'])
           PY
-          )" = "1.0.0"
+          )"
+          [[ "$PACKAGE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
           uv run python - <<'PY'
           from importlib.metadata import entry_points
           matches = [
@@ -154,6 +155,12 @@ jobs:
           PY
       - name: Install and import the exact built wheel in a clean environment
         run: |
+          PACKAGE_VERSION="$(python - <<'PY'
+          import tomllib
+          with open('pyproject.toml', 'rb') as handle:
+              print(tomllib.load(handle)['project']['version'])
+          PY
+          )"
           python -m venv /tmp/google-wheel-venv
           /tmp/google-wheel-venv/bin/python -m pip install \
             --disable-pip-version-check \
@@ -163,10 +170,11 @@ jobs:
             --disable-pip-version-check \
             --no-deps \
             dist/*.whl
-          /tmp/google-wheel-venv/bin/python - <<'PY'
+          PACKAGE_VERSION="$PACKAGE_VERSION" /tmp/google-wheel-venv/bin/python - <<'PY'
+          import os
           from importlib.metadata import entry_points, version
           import google_mcp_server
-          assert version('madpanda-google-mcp') == '1.0.0'
+          assert version('madpanda-google-mcp') == os.environ['PACKAGE_VERSION']
           assert google_mcp_server.registered_tool_count() == google_mcp_server.EXPECTED_TOOL_COUNT
           matches = [
               item for item in entry_points(group='console_scripts')

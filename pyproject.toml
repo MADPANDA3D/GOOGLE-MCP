@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "madpanda-google-mcp"
-version = "1.0.0"
+version = "1.0.1"
 description = "Dual-mode, request-scoped BYOK MCP server for Google Workspace and Google APIs"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"

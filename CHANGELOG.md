@@ -2,6 +2,22 @@
 
 All notable public releases are documented here.
 
+## 1.0.1 — 2026-07-18
+
+- Made first-release bootstrapping compatible with a clean source repository
+  that remains private until its package and release gates pass.
+- Added SHA-256 checksums for the wheel and source archive to every GitHub
+  Release.
+- Kept BuildKit SBOM and OCI provenance generation mandatory for every
+  published image while enabling GitHub-hosted attestations only when the
+  repository is public and that platform feature is available.
+- Removed hard-coded package-version assertions from CI so the built wheel is
+  always checked against the current `pyproject.toml` version.
+- Standardized the GitHub Release title on the `MADPANDA3D` company name.
+- Preserved `v1.0.0` as an immutable unsuccessful pre-publication candidate;
+  it failed before any container image or GitHub Release was published.
+- No MCP tool, risk, tier, authentication, or provider behavior changed.
+
 ## 1.0.0 — 2026-07-18
 
 - Established a clean public source root for the Python 3.12/3.13 FastMCP
