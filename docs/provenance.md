@@ -80,10 +80,19 @@ The release workflow is tag-driven and should:
 5. Build and scan the image from that same source.
 6. Smoke both standalone and Portal modes without contacting Google.
 7. Publish the image with SBOM and build provenance.
-8. Make the repository-linked container package public, then prove the exact
-   digest can be pulled anonymously.
-9. Scan, attest, and smoke the immutable published digest.
-10. Record that digest and package artifacts in the matching GitHub Release.
+8. Scan and attest the immutable published digest.
+9. Log out of GHCR and require an anonymous manifest read and pull of that
+   exact digest.
+10. Smoke the anonymously pulled digest in both access modes.
+11. Record that digest and package artifacts in the matching GitHub Release.
+
+The first container release has one owner-only bootstrap prerequisite. After
+GHCR creates and links the `google-mcp-server` package, a package owner must set
+its visibility to **Public** in Package Settings. GitHub treats public package
+visibility as irreversible. The workflow does not claim to automate that owner
+decision: it stops before the GitHub Release unless the exact digest is already
+anonymously pullable, and the same tagged workflow must be rerun after the
+visibility change.
 
 No container digest is asserted in this documentation before those publication
 steps produce it. Operators must obtain the digest from the actual release,

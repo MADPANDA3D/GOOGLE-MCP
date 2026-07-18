@@ -170,14 +170,6 @@ jobs:
             SOURCE_FINGERPRINT=${{ steps.source.outputs.fingerprint }}
           sbom: true
           provenance: mode=max
-      - name: Make the linked package publicly pullable
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh api --method PATCH \
-            /user/packages/container/google-mcp-server \
-            -f visibility=public \
-            --silent
       - name: Scan exact published digest with Trivy
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -196,7 +188,10 @@ jobs:
       - name: Require anonymous pull access
         run: |
           docker logout ghcr.io
-          docker manifest inspect "${IMAGE_NAME}@${{ steps.push.outputs.digest }}" >/dev/null
+          if ! docker manifest inspect "${IMAGE_NAME}@${{ steps.push.outputs.digest }}" >/dev/null; then
+            echo "::error::The GHCR package is not publicly pullable. A package owner must set the linked package visibility to Public, then rerun this exact tagged workflow."
+            exit 1
+          fi
           docker pull "${IMAGE_NAME}@${{ steps.push.outputs.digest }}"
       - name: Smoke the exact anonymously pulled published digest
         run: |
