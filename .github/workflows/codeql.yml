@@ -46,3 +46,7 @@ jobs:
         uses: github/codeql-action/analyze@7188fc363630916deb702c7fdcf4e481b751f97a # v4
         with:
           category: /language:python
+          # Private clean-staging repositories without GitHub Advanced Security
+          # still execute CodeQL locally. The canonical public repository uploads
+          # the same SARIF to code scanning.
+          upload: ${{ github.event.repository.visibility == 'public' && 'always' || 'never' }}
