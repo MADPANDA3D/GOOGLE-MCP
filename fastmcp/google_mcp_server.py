@@ -1497,7 +1497,8 @@ def _project_gmail_full_message(
     data: dict[str, Any],
     max_body_chars: int,
 ) -> dict[str, Any]:
-    payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+    raw_payload = data.get("payload")
+    payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
     bodies = _extract_gmail_bodies(payload)
     text_plain, plain_truncated, plain_chars = _bounded_gmail_text(
         bodies.get("text/plain", ""), max_body_chars
