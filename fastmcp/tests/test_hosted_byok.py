@@ -533,6 +533,102 @@ def test_gmail_plain_message_adds_text_and_html_signature_once():
     assert pre_signed_html.get_content().count(gm.GMAIL_SIGNATURE_MARKER) == 1
 
 
+def test_gmail_get_message_full_returns_bounded_privacy_safe_projection(monkeypatch):
+    encoded_plain = gm.base64.urlsafe_b64encode(b"amount $42.00 " * 20).decode()
+    encoded_html = gm.base64.urlsafe_b64encode(b"<p>amount $42.00</p>" * 20).decode()
+    provider_message = {
+        "id": "message-1",
+        "threadId": "thread-1",
+        "labelIds": ["INBOX"],
+        "snippet": "Stripe receipt",
+        "sizeEstimate": 500000,
+        "payload": {
+            "headers": [{"name": "Subject", "value": "Receipt"}],
+            "parts": [
+                {"mimeType": "text/plain", "body": {"data": encoded_plain}},
+                {"mimeType": "text/html", "body": {"data": encoded_html}},
+                {
+                    "mimeType": "application/pdf",
+                    "filename": "receipt.pdf",
+                    "body": {"attachmentId": "attachment-1", "size": 1234},
+                },
+            ],
+        },
+    }
+
+    class Request:
+        def execute(self):
+            return provider_message
+
+    class Messages:
+        def get(self, **kwargs):
+            assert kwargs["format"] == "full"
+            return Request()
+
+    service = SimpleNamespace(
+        users=lambda: SimpleNamespace(messages=lambda: Messages())
+    )
+    monkeypatch.setattr(gm.client, "get_service", lambda *_args: (service, False))
+
+    payload = json.loads(
+        asyncio.run(
+            gm.gmail_get_message(
+                message_id="message-1", format="full", max_body_chars=40
+            )
+        )
+    )
+    data = payload["data"]
+    assert payload["ok"] is True
+    assert len(data["text_plain"]) == 40
+    assert len(data["text_html"]) == 40
+    assert data["body_truncated"] is True
+    assert data["headers"] == {"subject": "Receipt"}
+    assert data["attachments"][0]["filename"] == "receipt.pdf"
+    assert "payload" not in data
+    assert encoded_plain not in json.dumps(data)
+
+
+def test_gmail_get_message_body_is_bounded_and_falls_back_to_html(monkeypatch):
+    encoded_html = gm.base64.urlsafe_b64encode(b"<p>Total $42.00</p>" * 20).decode()
+    provider_message = {
+        "id": "message-1",
+        "threadId": "thread-1",
+        "snippet": "Stripe receipt",
+        "payload": {
+            "parts": [
+                {"mimeType": "text/html", "body": {"data": encoded_html}},
+            ]
+        },
+    }
+
+    class Request:
+        def execute(self):
+            return provider_message
+
+    class Messages:
+        def get(self, **kwargs):
+            return Request()
+
+    service = SimpleNamespace(
+        users=lambda: SimpleNamespace(messages=lambda: Messages())
+    )
+    monkeypatch.setattr(gm.client, "get_service", lambda *_args: (service, False))
+
+    payload = json.loads(
+        asyncio.run(
+            gm.gmail_get_message_body(
+                message_id="message-1", max_body_chars=32
+            )
+        )
+    )
+    data = payload["data"]
+    assert payload["ok"] is True
+    assert data["text_plain"] == ""
+    assert data["body"] == data["text_html"]
+    assert len(data["body"]) == 32
+    assert data["body_truncated"] is True
+
+
 def test_gmail_html_message_does_not_duplicate_existing_signature():
     signature = _gmail_signature_fixture()
     message = gm.build_email_message(
