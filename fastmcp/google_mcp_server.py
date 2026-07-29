@@ -80,7 +80,7 @@ DEFAULT_GMAIL_METADATA_HEADERS = (
 )
 GMAIL_METADATA_BATCH_SIZE = 5
 GMAIL_SIGNATURE_MARKER = "data-madpanda-gmail-signature"
-DEFAULT_GMAIL_BODY_MAX_CHARS = 30000
+DEFAULT_GMAIL_BODY_MAX_CHARS = 8000
 MAX_GMAIL_BODY_MAX_CHARS = 100000
 MAX_GMAIL_ATTACHMENT_SUMMARIES = 50
 
@@ -1507,6 +1507,12 @@ def _project_gmail_full_message(
         bodies.get("text/html", ""), max_body_chars
     )
     attachments, attachments_truncated = _gmail_attachment_summaries(payload)
+    all_headers = _header_map(payload.get("headers", []) or [])
+    safe_headers = {
+        name.lower(): all_headers[name.lower()]
+        for name in DEFAULT_GMAIL_METADATA_HEADERS
+        if name.lower() in all_headers
+    }
     return {
         "id": data.get("id"),
         "threadId": data.get("threadId"),
@@ -1514,7 +1520,7 @@ def _project_gmail_full_message(
         "snippet": data.get("snippet", ""),
         "internalDate": data.get("internalDate"),
         "sizeEstimate": data.get("sizeEstimate"),
-        "headers": _header_map(payload.get("headers", []) or []),
+        "headers": safe_headers,
         "text_plain": text_plain,
         "text_html": text_html,
         "body_truncated": plain_truncated or html_truncated,
@@ -2294,7 +2300,7 @@ COMMON_PARAMETER_DESCRIPTIONS = {
     "max_bytes": "Maximum bytes to return when including file content.",
     "max_body_chars": (
         "Maximum characters returned per plain-text or HTML Gmail body. "
-        "Defaults to 30000 and is capped at 100000."
+        "Defaults to 8000 and is capped at 100000."
     ),
     "range_start": "Optional byte-range start for downloads.",
     "range_end": "Optional byte-range end for downloads.",
