@@ -533,7 +533,7 @@ def test_gmail_plain_message_adds_text_and_html_signature_once():
     assert pre_signed_html.get_content().count(gm.GMAIL_SIGNATURE_MARKER) == 1
 
 
-def test_gmail_get_message_full_returns_bounded_privacy_safe_projection(monkeypatch):
+def test_gmail_get_message_full_returns_bounded_privacy_safe_projection():
     encoded_plain = gm.base64.urlsafe_b64encode(b"amount $42.00 " * 20).decode()
     encoded_html = gm.base64.urlsafe_b64encode(b"<p>amount $42.00</p>" * 20).decode()
     provider_message = {
@@ -568,15 +568,25 @@ def test_gmail_get_message_full_returns_bounded_privacy_safe_projection(monkeypa
     service = SimpleNamespace(
         users=lambda: SimpleNamespace(messages=lambda: Messages())
     )
-    monkeypatch.setattr(gm.client, "get_service", lambda *_args: (service, False))
 
-    payload = json.loads(
-        asyncio.run(
-            gm.gmail_get_message(
-                message_id="message-1", format="full", max_body_chars=40
+    class Client:
+        def get_service(self, *_args):
+            return service, False
+
+        def is_session_cached(self):
+            return False
+
+    token = gm.ACTIVE_GOOGLE_CLIENT.set(Client())
+    try:
+        payload = json.loads(
+            asyncio.run(
+                gm.gmail_get_message(
+                    message_id="message-1", format="full", max_body_chars=40
+                )
             )
         )
-    )
+    finally:
+        gm.ACTIVE_GOOGLE_CLIENT.reset(token)
     data = payload["data"]
     assert payload["ok"] is True
     assert len(data["text_plain"]) == 40
@@ -588,7 +598,7 @@ def test_gmail_get_message_full_returns_bounded_privacy_safe_projection(monkeypa
     assert encoded_plain not in json.dumps(data)
 
 
-def test_gmail_get_message_body_is_bounded_and_falls_back_to_html(monkeypatch):
+def test_gmail_get_message_body_is_bounded_and_falls_back_to_html():
     encoded_html = gm.base64.urlsafe_b64encode(b"<p>Total $42.00</p>" * 20).decode()
     provider_message = {
         "id": "message-1",
@@ -612,15 +622,25 @@ def test_gmail_get_message_body_is_bounded_and_falls_back_to_html(monkeypatch):
     service = SimpleNamespace(
         users=lambda: SimpleNamespace(messages=lambda: Messages())
     )
-    monkeypatch.setattr(gm.client, "get_service", lambda *_args: (service, False))
 
-    payload = json.loads(
-        asyncio.run(
-            gm.gmail_get_message_body(
-                message_id="message-1", max_body_chars=32
+    class Client:
+        def get_service(self, *_args):
+            return service, False
+
+        def is_session_cached(self):
+            return False
+
+    token = gm.ACTIVE_GOOGLE_CLIENT.set(Client())
+    try:
+        payload = json.loads(
+            asyncio.run(
+                gm.gmail_get_message_body(
+                    message_id="message-1", max_body_chars=32
+                )
             )
         )
-    )
+    finally:
+        gm.ACTIVE_GOOGLE_CLIENT.reset(token)
     data = payload["data"]
     assert payload["ok"] is True
     assert data["text_plain"] == ""
