@@ -1445,8 +1445,7 @@ def _extract_gmail_bodies(payload: dict[str, Any] | None) -> dict[str, str]:
 
     _walk(payload)
     return {
-        mime_type: "\n".join(part for part in parts if part)
-        for mime_type, parts in results.items()
+        mime_type: "\n".join(part for part in parts if part) for mime_type, parts in results.items()
     }
 
 

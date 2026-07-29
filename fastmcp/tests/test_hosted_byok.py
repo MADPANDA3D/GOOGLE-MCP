@@ -565,9 +565,7 @@ def test_gmail_get_message_full_returns_bounded_privacy_safe_projection():
             assert kwargs["format"] == "full"
             return Request()
 
-    service = SimpleNamespace(
-        users=lambda: SimpleNamespace(messages=lambda: Messages())
-    )
+    service = SimpleNamespace(users=lambda: SimpleNamespace(messages=lambda: Messages()))
 
     class Client:
         def get_service(self, *_args):
@@ -580,9 +578,7 @@ def test_gmail_get_message_full_returns_bounded_privacy_safe_projection():
     try:
         payload = json.loads(
             asyncio.run(
-                gm.gmail_get_message(
-                    message_id="message-1", format="full", max_body_chars=40
-                )
+                gm.gmail_get_message(message_id="message-1", format="full", max_body_chars=40)
             )
         )
     finally:
@@ -619,9 +615,7 @@ def test_gmail_get_message_body_is_bounded_and_falls_back_to_html():
         def get(self, **kwargs):
             return Request()
 
-    service = SimpleNamespace(
-        users=lambda: SimpleNamespace(messages=lambda: Messages())
-    )
+    service = SimpleNamespace(users=lambda: SimpleNamespace(messages=lambda: Messages()))
 
     class Client:
         def get_service(self, *_args):
@@ -633,11 +627,7 @@ def test_gmail_get_message_body_is_bounded_and_falls_back_to_html():
     token = gm.ACTIVE_GOOGLE_CLIENT.set(Client())
     try:
         payload = json.loads(
-            asyncio.run(
-                gm.gmail_get_message_body(
-                    message_id="message-1", max_body_chars=32
-                )
-            )
+            asyncio.run(gm.gmail_get_message_body(message_id="message-1", max_body_chars=32))
         )
     finally:
         gm.ACTIVE_GOOGLE_CLIENT.reset(token)
