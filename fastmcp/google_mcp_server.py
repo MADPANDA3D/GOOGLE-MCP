@@ -82,6 +82,9 @@ DEFAULT_GMAIL_METADATA_HEADERS = (
 )
 GMAIL_METADATA_BATCH_SIZE = 5
 GMAIL_SIGNATURE_MARKER = "data-madpanda-gmail-signature"
+DEFAULT_GMAIL_BODY_MAX_CHARS = 30000
+MAX_GMAIL_BODY_MAX_CHARS = 100000
+MAX_GMAIL_ATTACHMENT_SUMMARIES = 50
 
 MCP_HTTP_PORT = int(os.getenv("MCP_HTTP_PORT", "8086"))
 MCP_BIND_ADDRESS = os.getenv("MCP_BIND_ADDRESS", "0.0.0.0")
@@ -1223,21 +1226,103 @@ def _decode_gmail_body(data: str) -> str:
 
 
 def _extract_gmail_bodies(payload: dict[str, Any] | None) -> dict[str, str]:
-    results: dict[str, str] = {}
+    results: dict[str, list[str]] = defaultdict(list)
     if not payload:
-        return results
+        return {}
 
     def _walk(part: dict[str, Any]) -> None:
         mime_type = part.get("mimeType")
         body = part.get("body", {}) if isinstance(part, dict) else {}
         data = body.get("data")
         if data and mime_type in {"text/plain", "text/html"}:
-            results[mime_type] = _decode_gmail_body(data)
+            results[mime_type].append(_decode_gmail_body(data))
         for sub in part.get("parts", []) or []:
-            _walk(sub)
+            if isinstance(sub, dict):
+                _walk(sub)
 
     _walk(payload)
-    return results
+    return {
+        mime_type: "\n".join(part for part in parts if part)
+        for mime_type, parts in results.items()
+    }
+
+
+def _bounded_gmail_text(value: str, max_chars: int) -> tuple[str, bool, int]:
+    original_chars = len(value)
+    if original_chars <= max_chars:
+        return value, False, original_chars
+    return value[:max_chars], True, original_chars
+
+
+def _gmail_body_limit(max_body_chars: int) -> int:
+    if max_body_chars < 1:
+        raise ValueError("max_body_chars must be at least 1")
+    return min(max_body_chars, MAX_GMAIL_BODY_MAX_CHARS)
+
+
+def _gmail_attachment_summaries(
+    payload: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], bool]:
+    attachments: list[dict[str, Any]] = []
+    total = 0
+
+    def _walk(part: dict[str, Any]) -> None:
+        nonlocal total
+        body = part.get("body", {}) if isinstance(part.get("body"), dict) else {}
+        attachment_id = body.get("attachmentId")
+        filename = str(part.get("filename") or "")
+        if attachment_id or filename:
+            total += 1
+            if len(attachments) < MAX_GMAIL_ATTACHMENT_SUMMARIES:
+                attachments.append(
+                    {
+                        "filename": _clip_string(filename, 240),
+                        "mimeType": str(part.get("mimeType") or ""),
+                        "size": int(body.get("size") or 0),
+                        "attachmentId": attachment_id,
+                    }
+                )
+        for sub in part.get("parts", []) or []:
+            if isinstance(sub, dict):
+                _walk(sub)
+
+    if payload:
+        _walk(payload)
+    return attachments, total > len(attachments)
+
+
+def _project_gmail_full_message(
+    data: dict[str, Any],
+    max_body_chars: int,
+) -> dict[str, Any]:
+    payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+    bodies = _extract_gmail_bodies(payload)
+    text_plain, plain_truncated, plain_chars = _bounded_gmail_text(
+        bodies.get("text/plain", ""), max_body_chars
+    )
+    text_html, html_truncated, html_chars = _bounded_gmail_text(
+        bodies.get("text/html", ""), max_body_chars
+    )
+    attachments, attachments_truncated = _gmail_attachment_summaries(payload)
+    return {
+        "id": data.get("id"),
+        "threadId": data.get("threadId"),
+        "labelIds": data.get("labelIds", []),
+        "snippet": data.get("snippet", ""),
+        "internalDate": data.get("internalDate"),
+        "sizeEstimate": data.get("sizeEstimate"),
+        "headers": _header_map(payload.get("headers", []) or []),
+        "text_plain": text_plain,
+        "text_html": text_html,
+        "body_truncated": plain_truncated or html_truncated,
+        "body_original_chars": {
+            "text_plain": plain_chars,
+            "text_html": html_chars,
+        },
+        "max_body_chars": max_body_chars,
+        "attachments": attachments,
+        "attachments_truncated": attachments_truncated,
+    }
 
 
 def _header_map(headers: list[dict[str, str]]) -> dict[str, str]:
@@ -1940,6 +2025,10 @@ COMMON_PARAMETER_DESCRIPTIONS = {
     "include_content": "Set true to include bounded base64 content in the response.",
     "return_mode": "Return mode for Drive downloads.",
     "max_bytes": "Maximum bytes to return when including file content.",
+    "max_body_chars": (
+        "Maximum characters returned per plain-text or HTML Gmail body. "
+        "Defaults to 30000 and is capped at 100000."
+    ),
     "range_start": "Optional byte-range start for downloads.",
     "range_end": "Optional byte-range end for downloads.",
     "mode": "Deletion mode.",
@@ -3899,6 +3988,7 @@ async def gmail_get_message(
     message_id: str,
     format: str = "metadata",
     metadata_headers: list[str] | None = None,
+    max_body_chars: int = DEFAULT_GMAIL_BODY_MAX_CHARS,
 ) -> str:
     """Get a Gmail message by ID."""
 
@@ -3906,6 +3996,7 @@ async def gmail_get_message(
         if not message_id:
             raise ValueError("message_id cannot be empty")
         service, cached = client.get_service("gmail", "v1")
+        body_limit = _gmail_body_limit(max_body_chars)
         effective_headers = metadata_headers or list(DEFAULT_GMAIL_METADATA_HEADERS)
         request = service.users().messages().get(
             userId="me",
@@ -3913,7 +4004,10 @@ async def gmail_get_message(
             format=format,
             metadataHeaders=effective_headers if format == "metadata" else None,
         )
-        return request.execute(), {"cached_service": cached}
+        data = request.execute()
+        if format == "full":
+            data = _project_gmail_full_message(data, body_limit)
+        return data, {"cached_service": cached}
 
     return await run_tool(
         "gmail",
@@ -3963,12 +4057,17 @@ async def gmail_get_message_headers(
 
 
 @mcp.tool()
-async def gmail_get_message_body(message_id: str, prefer_html: bool = False) -> str:
+async def gmail_get_message_body(
+    message_id: str,
+    prefer_html: bool = False,
+    max_body_chars: int = DEFAULT_GMAIL_BODY_MAX_CHARS,
+) -> str:
     """Extract text/plain or text/html content from a Gmail message."""
 
     def _get_body():
         if not message_id:
             raise ValueError("message_id cannot be empty")
+        body_limit = _gmail_body_limit(max_body_chars)
         service, cached = client.get_service("gmail", "v1")
         request = service.users().messages().get(
             userId="me",
@@ -3976,10 +4075,12 @@ async def gmail_get_message_body(message_id: str, prefer_html: bool = False) -> 
             format="full",
         )
         data = request.execute()
-        bodies = _extract_gmail_bodies(data.get("payload"))
-        text_plain = bodies.get("text/plain", "")
-        text_html = bodies.get("text/html", "")
+        projected = _project_gmail_full_message(data, body_limit)
+        text_plain = projected["text_plain"]
+        text_html = projected["text_html"]
         selected = text_html if prefer_html and text_html else text_plain
+        if not selected:
+            selected = text_html
         return (
             {
                 "id": data.get("id"),
@@ -3988,6 +4089,11 @@ async def gmail_get_message_body(message_id: str, prefer_html: bool = False) -> 
                 "text_plain": text_plain,
                 "text_html": text_html,
                 "body": selected,
+                "body_truncated": projected["body_truncated"],
+                "body_original_chars": projected["body_original_chars"],
+                "max_body_chars": body_limit,
+                "attachments": projected["attachments"],
+                "attachments_truncated": projected["attachments_truncated"],
             },
             {"cached_service": cached},
         )
