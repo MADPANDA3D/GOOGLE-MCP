@@ -2,6 +2,13 @@
 
 All notable public releases are documented here.
 
+## Unreleased
+
+- Updated the deterministic runtime lock from `cryptography` 49.0.0 to 50.0.0.
+- Added a frozen 151-tool compatibility projection and corrected the documented
+  descriptor hash for the current source contract.
+- No native tool identity, canonical name, or compatibility alias changed.
+
 ## 1.0.1 — 2026-07-18
 
 - Made first-release bootstrapping compatible with a clean source repository

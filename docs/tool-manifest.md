@@ -8,7 +8,7 @@
 | Service ID | `google` |
 | Catalog version | `google-2026.07.18.2` |
 | Native tools | 151 |
-| Descriptor hash | `077b95d066aea03504c2149589a8956f2c2b551eab899a21b76a14773a97048a` |
+| Descriptor hash | `2c777ccf9f5528e8a3fcaea8de69535ca8a8aae8f85fa622fa55e7d76ffc76d0` |
 
 `list_capabilities(include_descriptors=true)` is the provider-owned source of
 truth for the runtime contract. It returns the complete ordered descriptor

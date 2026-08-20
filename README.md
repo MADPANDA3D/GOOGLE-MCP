@@ -346,6 +346,7 @@ The verification suite uses synthetic credentials and must not contact Google.
 ## Documentation
 
 - [Complete tool catalog](docs/tool-catalog.md)
+- [Compatibility matrix](docs/compatibility-matrix.md)
 - [Endpoint coverage](docs/endpoint-coverage.md)
 - [ToolManifest contract](docs/tool-manifest.md)
 - [Security model](docs/security-model.md)

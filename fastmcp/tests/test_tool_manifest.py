@@ -33,7 +33,35 @@ def test_provider_manifest_is_complete_deterministic_and_lossless():
     }
     assert len(manifest["tools"]) == 151
     assert manifest["descriptorHash"] == _canonical_hash(manifest["tools"])
+    assert manifest["descriptorHash"] == (
+        "2c777ccf9f5528e8a3fcaea8de69535ca8a8aae8f85fa622fa55e7d76ffc76d0"
+    )
     assert STANDARD_NAVIGATION_TOOLS <= {item["nativeToolName"] for item in manifest["tools"]}
+
+    identity_projection = [
+        {key: descriptor[key] for key in ("nativeToolName", "canonicalName", "aliases")}
+        for descriptor in manifest["tools"]
+    ]
+    compatibility_projection = [
+        {
+            key: descriptor[key]
+            for key in (
+                "nativeToolName",
+                "aliases",
+                "inputSchema",
+                "outputSchema",
+                "annotations",
+                "confirmation",
+            )
+        }
+        for descriptor in manifest["tools"]
+    ]
+    assert _canonical_hash(identity_projection) == (
+        "156235e3f91fa345ae4e11308e20bddcd209822cc2cc1740e120dd6788cf52b6"
+    )
+    assert _canonical_hash(compatibility_projection) == (
+        "9f12a0b7bdc2df0b01ee1ecf6f8b3ff178b6b6bf56ad5ddab7f90be821b5b505"
+    )
 
     identities = set()
     risks = {"read": 0, "write": 0, "destructive": 0}
