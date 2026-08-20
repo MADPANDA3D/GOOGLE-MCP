@@ -644,7 +644,7 @@ wheels = [
 
 [[package]]
 name = "madpanda-google-mcp"
-version = "1.0.1"
+version = "1.0.2"
 source = { editable = "." }
 dependencies = [
     { name = "google-api-python-client" },
