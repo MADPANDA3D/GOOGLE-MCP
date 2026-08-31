@@ -2,6 +2,15 @@
 
 All notable public releases are documented here.
 
+## 1.0.3 — 2026-08-31
+
+- Added decoded-byte pagination to `gmail_get_attachment` through `offset` and
+  `chunk_bytes`, with explicit continuation metadata on every content page.
+- Kept the existing total-download and provider-response limits while ensuring
+  attachment content pages remain below the normalized MCP output boundary.
+- Advanced the provider catalog to `google-2026.08.31.1` without changing any
+  native tool identity, canonical name, alias, risk class, or confirmation.
+
 ## 1.0.2 — 2026-08-19
 
 - Updated the deterministic runtime lock from `cryptography` 49.0.0 to 50.0.0.
