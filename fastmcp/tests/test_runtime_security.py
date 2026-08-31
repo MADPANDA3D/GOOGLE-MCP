@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 
 import pytest
+from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.server import TransportSecuritySettings
 from starlette.testclient import TestClient
 
 TEST_PORTAL_GRANT_TOKEN = "test-portal-grant-0000000000000000"
@@ -503,6 +505,91 @@ def test_gmail_attachment_content_paginates_by_decoded_byte_offset(monkeypatch):
     assert result["data"]["next_offset"] == 5
     assert result["data"]["complete"] is False
     assert result["meta"]["provider_calls"] == 2
+
+
+def test_gmail_attachment_portal_mode_caps_pages_below_broker_budget(monkeypatch):
+    attachment = b"x" * 40000
+    encoded = base64.urlsafe_b64encode(attachment).decode("ascii").rstrip("=")
+    metadata = _StreamingJsonResponse({"size": len(attachment)})
+    content = _StreamingJsonResponse({"size": len(attachment), "data": encoded})
+    session = _AttachmentSession(metadata, content)
+    monkeypatch.setattr(gm, "client", _AttachmentClient(session))
+    monkeypatch.setattr(gm, "MCP_MODE", "portal")
+
+    result = json.loads(
+        asyncio.run(
+            gm.gmail_get_attachment(
+                message_id="message",
+                attachment_id="attachment",
+                max_bytes=50000,
+                include_content=True,
+                chunk_bytes=50000,
+            )
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["chunk_bytes"] == gm.PORTAL_MAX_ATTACHMENT_CHUNK_BYTES
+    assert result["data"]["returned_bytes"] == gm.PORTAL_MAX_ATTACHMENT_CHUNK_BYTES
+    assert result["data"]["next_offset"] == gm.PORTAL_MAX_ATTACHMENT_CHUNK_BYTES
+    assert result["data"]["complete"] is False
+    assert result["meta"]["bytes_out"] < 57344
+
+
+def test_gmail_attachment_complete_mcp_result_fits_broker_budget(monkeypatch):
+    attachment = b"x" * 40000
+    encoded = base64.urlsafe_b64encode(attachment).decode("ascii").rstrip("=")
+    metadata = _StreamingJsonResponse({"size": len(attachment)})
+    content = _StreamingJsonResponse({"size": len(attachment), "data": encoded})
+    provider_client = _AttachmentClient(_AttachmentSession(metadata, content))
+    monkeypatch.setattr(
+        gm,
+        "_resolve_request_client",
+        lambda _headers: (provider_client, {"auth_mode": "test"}),
+    )
+
+    transport_mcp = FastMCP(
+        name="gmail-attachment-envelope-test",
+        stateless_http=True,
+        json_response=True,
+        transport_security=TransportSecuritySettings(allowed_hosts=["localhost"]),
+    )
+    transport_mcp.tool()(gm.gmail_get_attachment)
+    with TestClient(
+        gm.build_hosted_mcp_http_wrapper(transport_mcp.streamable_http_app()),
+        base_url="http://localhost",
+    ) as client:
+        response = client.post(
+            "/mcp",
+            headers={
+                **_portal_headers(),
+                "X-Google-Client-Id": "client-id",
+                "X-Google-Client-Secret": "client-secret",
+                "X-Google-Refresh-Token": "refresh-token",
+            },
+            json={
+                "jsonrpc": "2.0",
+                "id": 31,
+                "method": "tools/call",
+                "params": {
+                    "name": "gmail_get_attachment",
+                    "arguments": {
+                        "message_id": "message-" + "m" * 64,
+                        "attachment_id": "attachment-" + "a" * 64,
+                        "max_bytes": 50000,
+                        "include_content": True,
+                        "chunk_bytes": 50000,
+                    },
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    assert len(response.content) < 57344
+    tool_result = response.json()["result"]
+    inner = json.loads(tool_result["content"][0]["text"])
+    assert inner["data"]["returned_bytes"] == gm.PORTAL_MAX_ATTACHMENT_CHUNK_BYTES
+    assert tool_result["structuredContent"]["result"] == tool_result["content"][0]["text"]
 
 
 def test_gmail_attachment_rejects_out_of_range_offset_before_content_fetch(monkeypatch):

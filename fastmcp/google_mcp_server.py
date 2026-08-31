@@ -128,7 +128,10 @@ MCP_MAX_PROVIDER_CALLS_PER_TOOL = max(
 )
 MCP_DRIVE_ALLOWLIST_PARENT_ID = os.getenv("MCP_DRIVE_ALLOWLIST_PARENT_ID", "")
 DEFAULT_MAX_DOWNLOAD_BYTES = max(int(os.getenv("MCP_MAX_DOWNLOAD_BYTES", "5000000")), 4096)
-DEFAULT_ATTACHMENT_CHUNK_BYTES = 512 * 1024
+DEFAULT_ATTACHMENT_CHUNK_BYTES = 32 * 1024
+# FastMCP serializes string tool results into both content and structuredContent.
+# Keep the complete MCP envelope below Portal's 56 KiB provider-result budget.
+PORTAL_MAX_ATTACHMENT_CHUNK_BYTES = 19 * 1024
 MCP_BUILD_SHA = os.getenv("MCP_BUILD_SHA", "development").strip() or "development"
 MCP_SERVER_VERSION = os.getenv("MCP_SERVER_VERSION", MCP_BUILD_SHA).strip() or MCP_BUILD_SHA
 MCP_SOURCE_FINGERPRINT = os.getenv("MCP_SOURCE_FINGERPRINT", "development").strip() or "development"
@@ -2298,7 +2301,10 @@ COMMON_PARAMETER_DESCRIPTIONS = {
     "export_mime_type": "MIME type to export Google-native files as.",
     "include_content": "Set true to include bounded base64 content in the response.",
     "offset": "Zero-based decoded byte offset for paginated attachment content.",
-    "chunk_bytes": "Maximum decoded attachment bytes to return in this page.",
+    "chunk_bytes": (
+        "Maximum decoded attachment bytes to return in this page. Portal mode caps pages at "
+        "19456 bytes so the complete MCP envelope remains inside the broker result boundary."
+    ),
     "return_mode": "Return mode for Drive downloads.",
     "max_bytes": "Maximum bytes to return when including file content.",
     "max_body_chars": (
@@ -5061,10 +5067,15 @@ async def gmail_get_attachment(
             1,
             ((MCP_TOOL_OUTPUT_MAX_BYTES - 16 * 1024) * 3) // 4,
         )
+        mode_chunk_capacity = (
+            min(encoded_tool_capacity, PORTAL_MAX_ATTACHMENT_CHUNK_BYTES)
+            if MCP_MODE == "portal"
+            else encoded_tool_capacity
+        )
         effective_chunk_bytes = min(
             requested_chunk_bytes,
             effective_max_bytes,
-            encoded_tool_capacity,
+            mode_chunk_capacity,
         )
         session, cached = client.get_session()
         message_path = urllib.parse.quote(message_id, safe="")
