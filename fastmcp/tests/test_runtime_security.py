@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import stat
 import sys
@@ -458,6 +459,12 @@ def test_gmail_attachment_content_is_streamed_bounded_and_closed(monkeypatch):
         "attachment_id": "attachment",
         "size": 3,
         "data": "YWJj",
+        "encoding": "base64url",
+        "offset": 0,
+        "returned_bytes": 3,
+        "chunk_bytes": 4096,
+        "next_offset": None,
+        "complete": True,
     }
     assert result["meta"]["provider_calls"] == 2
     assert [call[2]["params"] for call in session.calls] == [
@@ -467,6 +474,60 @@ def test_gmail_attachment_content_is_streamed_bounded_and_closed(monkeypatch):
     assert all(call[2]["stream"] is True for call in session.calls)
     assert metadata.closed is True
     assert content.closed is True
+
+
+def test_gmail_attachment_content_paginates_by_decoded_byte_offset(monkeypatch):
+    metadata = _StreamingJsonResponse({"size": 6})
+    content = _StreamingJsonResponse({"size": 6, "data": "YWJjZGVm"})
+    session = _AttachmentSession(metadata, content)
+    monkeypatch.setattr(gm, "client", _AttachmentClient(session))
+
+    result = json.loads(
+        asyncio.run(
+            gm.gmail_get_attachment(
+                message_id="message",
+                attachment_id="attachment",
+                max_bytes=4096,
+                include_content=True,
+                offset=2,
+                chunk_bytes=3,
+            )
+        )
+    )
+
+    assert result["ok"] is True
+    assert base64.urlsafe_b64decode(result["data"]["data"] + "===") == b"cde"
+    assert result["data"]["offset"] == 2
+    assert result["data"]["returned_bytes"] == 3
+    assert result["data"]["chunk_bytes"] == 3
+    assert result["data"]["next_offset"] == 5
+    assert result["data"]["complete"] is False
+    assert result["meta"]["provider_calls"] == 2
+
+
+def test_gmail_attachment_rejects_out_of_range_offset_before_content_fetch(monkeypatch):
+    metadata = _StreamingJsonResponse({"size": 6})
+    content = _StreamingJsonResponse({"size": 6, "data": "YWJjZGVm"})
+    session = _AttachmentSession(metadata, content)
+    monkeypatch.setattr(gm, "client", _AttachmentClient(session))
+
+    result = json.loads(
+        asyncio.run(
+            gm.gmail_get_attachment(
+                message_id="message",
+                attachment_id="attachment",
+                include_content=True,
+                offset=7,
+            )
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["type"] == "invalid_params"
+    assert "offset cannot exceed" in result["error"]["message"]
+    assert len(session.calls) == 1
+    assert metadata.closed is True
+    assert content.closed is False
 
 
 def test_raw_request_rejects_mutation_headers_credentials_and_token_host():

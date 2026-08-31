@@ -128,6 +128,7 @@ MCP_MAX_PROVIDER_CALLS_PER_TOOL = max(
 )
 MCP_DRIVE_ALLOWLIST_PARENT_ID = os.getenv("MCP_DRIVE_ALLOWLIST_PARENT_ID", "")
 DEFAULT_MAX_DOWNLOAD_BYTES = max(int(os.getenv("MCP_MAX_DOWNLOAD_BYTES", "5000000")), 4096)
+DEFAULT_ATTACHMENT_CHUNK_BYTES = 512 * 1024
 MCP_BUILD_SHA = os.getenv("MCP_BUILD_SHA", "development").strip() or "development"
 MCP_SERVER_VERSION = os.getenv("MCP_SERVER_VERSION", MCP_BUILD_SHA).strip() or MCP_BUILD_SHA
 MCP_SOURCE_FINGERPRINT = os.getenv("MCP_SOURCE_FINGERPRINT", "development").strip() or "development"
@@ -2296,6 +2297,8 @@ COMMON_PARAMETER_DESCRIPTIONS = {
     "file_size": "Optional byte size for a resumable upload session.",
     "export_mime_type": "MIME type to export Google-native files as.",
     "include_content": "Set true to include bounded base64 content in the response.",
+    "offset": "Zero-based decoded byte offset for paginated attachment content.",
+    "chunk_bytes": "Maximum decoded attachment bytes to return in this page.",
     "return_mode": "Return mode for Drive downloads.",
     "max_bytes": "Maximum bytes to return when including file content.",
     "max_body_chars": (
@@ -5029,20 +5032,40 @@ async def gmail_get_attachment(
     attachment_id: str,
     max_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES,
     include_content: bool = False,
+    offset: int = 0,
+    chunk_bytes: int = DEFAULT_ATTACHMENT_CHUNK_BYTES,
 ) -> str:
-    """Fetch Gmail attachment metadata or bounded base64 content."""
+    """Fetch Gmail attachment metadata or a bounded base64url content page."""
 
     def _get_attachment():
         if not message_id:
             raise ValueError("message_id cannot be empty")
         if not attachment_id:
             raise ValueError("attachment_id cannot be empty")
+        try:
+            content_offset = int(offset)
+            requested_chunk_bytes = int(chunk_bytes)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("offset and chunk_bytes must be integers.") from exc
+        if content_offset < 0:
+            raise ValueError("offset must be zero or greater.")
+        if requested_chunk_bytes <= 0:
+            raise ValueError("chunk_bytes must be a positive integer.")
         requested_limit = _effective_download_limit(max_bytes)
         encoded_provider_capacity = max(
             1,
             ((MCP_PROVIDER_RESPONSE_MAX_BYTES - 4096) * 3) // 4,
         )
         effective_max_bytes = min(requested_limit, encoded_provider_capacity)
+        encoded_tool_capacity = max(
+            1,
+            ((MCP_TOOL_OUTPUT_MAX_BYTES - 16 * 1024) * 3) // 4,
+        )
+        effective_chunk_bytes = min(
+            requested_chunk_bytes,
+            effective_max_bytes,
+            encoded_tool_capacity,
+        )
         session, cached = client.get_session()
         message_path = urllib.parse.quote(message_id, safe="")
         attachment_path = urllib.parse.quote(attachment_id, safe="")
@@ -5098,6 +5121,8 @@ async def gmail_get_attachment(
         payload: dict[str, Any] = {"attachment_id": attachment_id, "size": size}
         if not include_content:
             return payload, {"cached_session": cached, "provider_calls": 1}
+        if content_offset > size:
+            raise ValueError("offset cannot exceed the attachment size.")
         if size > effective_max_bytes:
             payload.update({"too_large": True, "max_bytes": effective_max_bytes})
             return payload, {"cached_session": cached, "provider_calls": 1}
@@ -5135,7 +5160,20 @@ async def gmail_get_attachment(
                 action="Retry the attachment request.",
             )
         encoded_data = str(content.get("data") or "")
-        encoded_size_estimate = (len(encoded_data.rstrip("=")) * 3) // 4
+        try:
+            padded_data = encoded_data + "=" * (-len(encoded_data) % 4)
+            decoded_data = base64.b64decode(
+                padded_data.encode("ascii"),
+                altchars=b"-_",
+                validate=True,
+            )
+        except (UnicodeEncodeError, ValueError) as exc:
+            raise GoogleProviderError(
+                "Gmail returned invalid base64url attachment content.",
+                error_type="invalid_provider_response",
+                status=content_response.status_code,
+                action="Retry the attachment request.",
+            ) from exc
         reported_size = content.get("size")
         try:
             content_size = int(reported_size) if reported_size is not None else size
@@ -5146,7 +5184,7 @@ async def gmail_get_attachment(
                 status=content_response.status_code,
                 action="Retry the attachment request.",
             ) from exc
-        content_size = max(content_size, encoded_size_estimate)
+        content_size = max(content_size, len(decoded_data))
         if content_size > effective_max_bytes:
             raise GoogleProviderError(
                 "Gmail attachment content exceeded the configured download limit.",
@@ -5154,7 +5192,28 @@ async def gmail_get_attachment(
                 status=content_response.status_code,
                 action="Request attachment metadata or increase the operator-controlled limit.",
             )
-        payload.update({"size": content_size, "data": encoded_data})
+        if len(decoded_data) != content_size:
+            raise GoogleProviderError(
+                "Gmail returned incomplete attachment content.",
+                error_type="invalid_provider_response",
+                status=content_response.status_code,
+                action="Retry the attachment request.",
+            )
+        chunk_end = min(content_offset + effective_chunk_bytes, content_size)
+        decoded_chunk = decoded_data[content_offset:chunk_end]
+        encoded_chunk = base64.urlsafe_b64encode(decoded_chunk).decode("ascii").rstrip("=")
+        payload.update(
+            {
+                "size": content_size,
+                "data": encoded_chunk,
+                "encoding": "base64url",
+                "offset": content_offset,
+                "returned_bytes": len(decoded_chunk),
+                "chunk_bytes": effective_chunk_bytes,
+                "next_offset": chunk_end if chunk_end < content_size else None,
+                "complete": chunk_end >= content_size,
+            }
+        )
         return payload, {"cached_session": cached, "provider_calls": 2}
 
     return await run_tool("gmail", "get_attachment", _get_attachment, allow_retry=True)

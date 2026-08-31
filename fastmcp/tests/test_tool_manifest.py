@@ -24,7 +24,7 @@ def test_provider_manifest_is_complete_deterministic_and_lossless():
     assert manifest["schemaVersion"] == "1.0.0"
     assert manifest["serviceId"] == "google"
     assert manifest["catalogVersion"] == CATALOG_VERSION
-    assert CATALOG_VERSION == "google-2026.07.18.2"
+    assert CATALOG_VERSION == "google-2026.08.31.1"
     assert manifest["counts"] == {
         "raw": 151,
         "agentReady": 144,
@@ -34,7 +34,7 @@ def test_provider_manifest_is_complete_deterministic_and_lossless():
     assert len(manifest["tools"]) == 151
     assert manifest["descriptorHash"] == _canonical_hash(manifest["tools"])
     assert manifest["descriptorHash"] == (
-        "2c777ccf9f5528e8a3fcaea8de69535ca8a8aae8f85fa622fa55e7d76ffc76d0"
+        "6fe9b3b01e97ac68c1797e037a27fc2ee0bb119b753cc86c7100b74312f93703"
     )
     assert STANDARD_NAVIGATION_TOOLS <= {item["nativeToolName"] for item in manifest["tools"]}
 
@@ -60,7 +60,7 @@ def test_provider_manifest_is_complete_deterministic_and_lossless():
         "156235e3f91fa345ae4e11308e20bddcd209822cc2cc1740e120dd6788cf52b6"
     )
     assert _canonical_hash(compatibility_projection) == (
-        "9f12a0b7bdc2df0b01ee1ecf6f8b3ff178b6b6bf56ad5ddab7f90be821b5b505"
+        "c87b27c96dbd7ea15d32585f241c7fce36f67d1f531f86ebbe679b4917340209"
     )
 
     identities = set()
@@ -152,6 +152,20 @@ def test_gmail_update_draft_is_destructive_and_fails_closed_without_confirmation
     )
     assert result["ok"] is False
     assert "confirm=true" in result["error"]["message"]
+
+
+def test_gmail_attachment_descriptor_advertises_content_pagination():
+    descriptor = next(
+        item
+        for item in gm._current_tool_manifest()["tools"]
+        if item["nativeToolName"] == "gmail_get_attachment"
+    )
+    properties = descriptor["inputSchema"]["properties"]
+
+    assert properties["offset"]["default"] == 0
+    assert "decoded byte offset" in properties["offset"]["description"]
+    assert properties["chunk_bytes"]["default"] == gm.DEFAULT_ATTACHMENT_CHUNK_BYTES
+    assert "decoded attachment bytes" in properties["chunk_bytes"]["description"]
 
 
 def test_manifest_preserves_legacy_and_advanced_contract_tiers():
