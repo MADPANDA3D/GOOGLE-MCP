@@ -129,7 +129,9 @@ MCP_MAX_PROVIDER_CALLS_PER_TOOL = max(
 MCP_DRIVE_ALLOWLIST_PARENT_ID = os.getenv("MCP_DRIVE_ALLOWLIST_PARENT_ID", "")
 DEFAULT_MAX_DOWNLOAD_BYTES = max(int(os.getenv("MCP_MAX_DOWNLOAD_BYTES", "5000000")), 4096)
 DEFAULT_ATTACHMENT_CHUNK_BYTES = 32 * 1024
-PORTAL_MAX_ATTACHMENT_CHUNK_BYTES = 32 * 1024
+# FastMCP serializes string tool results into both content and structuredContent.
+# Keep the complete MCP envelope below Portal's 56 KiB provider-result budget.
+PORTAL_MAX_ATTACHMENT_CHUNK_BYTES = 19 * 1024
 MCP_BUILD_SHA = os.getenv("MCP_BUILD_SHA", "development").strip() or "development"
 MCP_SERVER_VERSION = os.getenv("MCP_SERVER_VERSION", MCP_BUILD_SHA).strip() or MCP_BUILD_SHA
 MCP_SOURCE_FINGERPRINT = os.getenv("MCP_SOURCE_FINGERPRINT", "development").strip() or "development"
