@@ -2303,7 +2303,7 @@ COMMON_PARAMETER_DESCRIPTIONS = {
     "offset": "Zero-based decoded byte offset for paginated attachment content.",
     "chunk_bytes": (
         "Maximum decoded attachment bytes to return in this page. Portal mode caps pages at "
-        "32768 bytes so base64 content remains inside the broker result boundary."
+        "19456 bytes so the complete MCP envelope remains inside the broker result boundary."
     ),
     "return_mode": "Return mode for Drive downloads.",
     "max_bytes": "Maximum bytes to return when including file content.",
