@@ -505,6 +505,35 @@ def test_gmail_attachment_content_paginates_by_decoded_byte_offset(monkeypatch):
     assert result["meta"]["provider_calls"] == 2
 
 
+def test_gmail_attachment_portal_mode_caps_pages_below_broker_budget(monkeypatch):
+    attachment = b"x" * 40000
+    encoded = base64.urlsafe_b64encode(attachment).decode("ascii").rstrip("=")
+    metadata = _StreamingJsonResponse({"size": len(attachment)})
+    content = _StreamingJsonResponse({"size": len(attachment), "data": encoded})
+    session = _AttachmentSession(metadata, content)
+    monkeypatch.setattr(gm, "client", _AttachmentClient(session))
+    monkeypatch.setattr(gm, "MCP_MODE", "portal")
+
+    result = json.loads(
+        asyncio.run(
+            gm.gmail_get_attachment(
+                message_id="message",
+                attachment_id="attachment",
+                max_bytes=50000,
+                include_content=True,
+                chunk_bytes=50000,
+            )
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["chunk_bytes"] == gm.PORTAL_MAX_ATTACHMENT_CHUNK_BYTES
+    assert result["data"]["returned_bytes"] == gm.PORTAL_MAX_ATTACHMENT_CHUNK_BYTES
+    assert result["data"]["next_offset"] == gm.PORTAL_MAX_ATTACHMENT_CHUNK_BYTES
+    assert result["data"]["complete"] is False
+    assert result["meta"]["bytes_out"] < 57344
+
+
 def test_gmail_attachment_rejects_out_of_range_offset_before_content_fetch(monkeypatch):
     metadata = _StreamingJsonResponse({"size": 6})
     content = _StreamingJsonResponse({"size": 6, "data": "YWJjZGVm"})

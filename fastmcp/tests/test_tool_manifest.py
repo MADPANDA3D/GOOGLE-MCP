@@ -34,7 +34,7 @@ def test_provider_manifest_is_complete_deterministic_and_lossless():
     assert len(manifest["tools"]) == 151
     assert manifest["descriptorHash"] == _canonical_hash(manifest["tools"])
     assert manifest["descriptorHash"] == (
-        "6fe9b3b01e97ac68c1797e037a27fc2ee0bb119b753cc86c7100b74312f93703"
+        "dea8318c59cef9c2e5343c2f6bfee7b7f23e2cea6e365747f2f9c13a21c20f88"
     )
     assert STANDARD_NAVIGATION_TOOLS <= {item["nativeToolName"] for item in manifest["tools"]}
 
@@ -60,7 +60,7 @@ def test_provider_manifest_is_complete_deterministic_and_lossless():
         "156235e3f91fa345ae4e11308e20bddcd209822cc2cc1740e120dd6788cf52b6"
     )
     assert _canonical_hash(compatibility_projection) == (
-        "c87b27c96dbd7ea15d32585f241c7fce36f67d1f531f86ebbe679b4917340209"
+        "9285718449c46d25ec4bac61bd7d52dd32303422ad53091c10320c9689ed711d"
     )
 
     identities = set()
