@@ -11,6 +11,10 @@ LABEL org.opencontainers.image.title="MADPANDA Google MCP" \
       org.opencontainers.image.licenses="MIT" \
       com.madpanda.source-fingerprint="${SOURCE_FINGERPRINT}"
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends --only-upgrade libpcre2-8-0 \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN groupadd --gid 10001 app \
     && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin app \
     && test "$(id -u app)" = "10001" \
