@@ -19,6 +19,7 @@ RUN python -m pip install --no-cache-dir --upgrade pip==26.1.2 \
     && pip install --no-cache-dir -r requirements.txt
 
 COPY --chown=10001:10001 google_mcp_server.py ./
+COPY --chown=10001:10001 google_mcp_entrypoint.py ./
 COPY --chown=10001:10001 google_auth_local.py ./
 COPY --chown=10001:10001 tool_manifest.py ./
 
@@ -39,4 +40,4 @@ USER 10001:10001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8086/health', timeout=3).read()"]
 
-CMD ["python", "google_mcp_server.py"]
+CMD ["python", "google_mcp_entrypoint.py"]

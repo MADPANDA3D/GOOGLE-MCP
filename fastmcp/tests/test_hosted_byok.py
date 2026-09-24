@@ -546,7 +546,12 @@ def test_gmail_get_message_full_returns_bounded_privacy_safe_projection(monkeypa
     service = SimpleNamespace(
         users=lambda: SimpleNamespace(messages=lambda: Messages())
     )
-    monkeypatch.setattr(gm.client, "get_service", lambda *_args: (service, False))
+    monkeypatch.setattr(
+        gm.ActiveClientProxy,
+        "get_service",
+        lambda *_args: (service, False),
+        raising=False,
+    )
 
     payload = json.loads(
         asyncio.run(
@@ -564,6 +569,63 @@ def test_gmail_get_message_full_returns_bounded_privacy_safe_projection(monkeypa
     assert data["attachments"][0]["filename"] == "receipt.pdf"
     assert "payload" not in data
     assert encoded_plain not in json.dumps(data)
+
+
+def test_gmail_get_attachment_returns_reconstructable_portal_safe_chunks(monkeypatch):
+    content = bytes((index % 251 for index in range(195455)))
+    provider_attachment = {
+        "size": len(content),
+        "data": gm.base64.urlsafe_b64encode(content).decode("ascii").rstrip("="),
+    }
+
+    class Request:
+        def execute(self):
+            return provider_attachment
+
+    class Attachments:
+        def get(self, **kwargs):
+            assert kwargs == {
+                "userId": "me",
+                "messageId": "message-1",
+                "id": "attachment-1",
+            }
+            return Request()
+
+    service = SimpleNamespace(
+        users=lambda: SimpleNamespace(
+            messages=lambda: SimpleNamespace(attachments=lambda: Attachments())
+        )
+    )
+    monkeypatch.setattr(
+        gm.ActiveClientProxy,
+        "get_service",
+        lambda *_args: (service, False),
+        raising=False,
+    )
+
+    reconstructed = bytearray()
+    offset = 0
+    while True:
+        raw = asyncio.run(
+            gm.gmail_get_attachment(
+                message_id="message-1",
+                attachment_id="attachment-1",
+                max_bytes=500000,
+                include_content=True,
+                offset=offset,
+            )
+        )
+        assert len(raw.encode("utf-8")) < 57344
+        payload = json.loads(raw)
+        data = payload["data"]
+        reconstructed.extend(gm.base64.urlsafe_b64decode(data["data"]))
+        if not data["has_more"]:
+            assert data["next_offset"] is None
+            break
+        assert data["next_offset"] == offset + data["chunk_bytes"]
+        offset = data["next_offset"]
+
+    assert bytes(reconstructed) == content
 
 
 def test_gmail_get_message_body_is_bounded_and_falls_back_to_html(monkeypatch):
@@ -590,7 +652,12 @@ def test_gmail_get_message_body_is_bounded_and_falls_back_to_html(monkeypatch):
     service = SimpleNamespace(
         users=lambda: SimpleNamespace(messages=lambda: Messages())
     )
-    monkeypatch.setattr(gm.client, "get_service", lambda *_args: (service, False))
+    monkeypatch.setattr(
+        gm.ActiveClientProxy,
+        "get_service",
+        lambda *_args: (service, False),
+        raising=False,
+    )
 
     payload = json.loads(
         asyncio.run(

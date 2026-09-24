@@ -85,6 +85,8 @@ GMAIL_SIGNATURE_MARKER = "data-madpanda-gmail-signature"
 DEFAULT_GMAIL_BODY_MAX_CHARS = 8000
 MAX_GMAIL_BODY_MAX_CHARS = 100000
 MAX_GMAIL_ATTACHMENT_SUMMARIES = 50
+DEFAULT_GMAIL_ATTACHMENT_CHUNK_BYTES = 32 * 1024
+MAX_GMAIL_ATTACHMENT_CHUNK_BYTES = 32 * 1024
 
 MCP_HTTP_PORT = int(os.getenv("MCP_HTTP_PORT", "8086"))
 MCP_BIND_ADDRESS = os.getenv("MCP_BIND_ADDRESS", "0.0.0.0")
@@ -2031,6 +2033,11 @@ COMMON_PARAMETER_DESCRIPTIONS = {
     "include_content": "Set true to include bounded base64 content in the response.",
     "return_mode": "Return mode for Drive downloads.",
     "max_bytes": "Maximum bytes to return when including file content.",
+    "offset": "Zero-based byte offset for resumable attachment content retrieval.",
+    "chunk_bytes": (
+        "Raw attachment bytes to return per call. Defaults to and is capped at 32768 "
+        "so the base64url response fits the Portal response budget."
+    ),
     "max_body_chars": (
         "Maximum characters returned per plain-text or HTML Gmail body. "
         "Defaults to 8000 and is capped at 100000."
@@ -4674,14 +4681,22 @@ async def gmail_get_attachment(
     attachment_id: str,
     max_bytes: int = DEFAULT_MAX_DOWNLOAD_BYTES,
     include_content: bool = False,
+    offset: int = 0,
+    chunk_bytes: int = DEFAULT_GMAIL_ATTACHMENT_CHUNK_BYTES,
 ) -> str:
-    """Fetch Gmail attachment metadata or bounded base64 content."""
+    """Fetch Gmail attachment metadata or a resumable base64url content chunk."""
 
     def _get_attachment():
         if not message_id:
             raise ValueError("message_id cannot be empty")
         if not attachment_id:
             raise ValueError("attachment_id cannot be empty")
+        if offset < 0:
+            raise ValueError("offset must be zero or greater")
+        if chunk_bytes < 1 or chunk_bytes > MAX_GMAIL_ATTACHMENT_CHUNK_BYTES:
+            raise ValueError(
+                f"chunk_bytes must be between 1 and {MAX_GMAIL_ATTACHMENT_CHUNK_BYTES}"
+            )
         service, cached = client.get_service("gmail", "v1")
         data = (
             service.users()
@@ -4696,7 +4711,24 @@ async def gmail_get_attachment(
             if max_bytes and size > max_bytes:
                 payload.update({"too_large": True, "max_bytes": max_bytes})
             else:
-                payload["data"] = data.get("data", "")
+                encoded = str(data.get("data", ""))
+                padded = encoded + ("=" * (-len(encoded) % 4))
+                content = base64.urlsafe_b64decode(padded.encode("ascii"))
+                if offset > len(content):
+                    raise ValueError("offset cannot exceed attachment size")
+                chunk = content[offset : offset + chunk_bytes]
+                next_offset = offset + len(chunk)
+                has_more = next_offset < len(content)
+                payload.update(
+                    {
+                        "data": base64.urlsafe_b64encode(chunk).decode("ascii"),
+                        "encoding": "base64url",
+                        "offset": offset,
+                        "chunk_bytes": len(chunk),
+                        "has_more": has_more,
+                        "next_offset": next_offset if has_more else None,
+                    }
+                )
         return payload, {"cached_service": cached}
 
     return await run_tool("gmail", "get_attachment", _get_attachment, allow_retry=True)
