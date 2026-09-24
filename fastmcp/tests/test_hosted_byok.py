@@ -922,6 +922,132 @@ def test_gmail_message_fingerprint_binding_fails_when_draft_changes():
         gm._verify_gmail_message_fingerprint(changed_raw, fingerprint)
 
 
+def test_gmail_draft_read_update_send_uses_supported_provider_arguments(monkeypatch):
+    signature = _gmail_signature_fixture()
+    initial_message = gm.build_email_message(
+        to="recipient@example.com",
+        subject="Initial",
+        body="Initial body",
+        signature=signature,
+    )
+    state = {"raw": gm.encode_email_message(initial_message)}
+    calls = {}
+
+    class _Request:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def execute(self):
+            return self.payload
+
+    class _Service:
+        def users(self):
+            return self
+
+        def settings(self):
+            return self
+
+        def sendAs(self):
+            return self
+
+        def drafts(self):
+            return self
+
+        def list(self, **kwargs):
+            assert kwargs == {"userId": "me"}
+            return _Request(
+                {
+                    "sendAs": [
+                        {
+                            "sendAsEmail": signature.alias,
+                            "signature": signature.html,
+                            "isDefault": True,
+                        }
+                    ]
+                }
+            )
+
+        def get(self, **kwargs):
+            assert set(kwargs) == {"userId", "id", "format"}
+            calls["get"] = kwargs
+            if kwargs["format"] == "raw":
+                return _Request({"id": kwargs["id"], "message": {"raw": state["raw"]}})
+            return _Request(
+                {
+                    "id": kwargs["id"],
+                    "message": {
+                        "payload": {
+                            "headers": [
+                                {"name": "Subject", "value": "Initial"},
+                                {"name": "X-Internal", "value": "omit"},
+                            ]
+                        }
+                    },
+                }
+            )
+
+        def update(self, **kwargs):
+            calls["update"] = kwargs
+            state["raw"] = kwargs["body"]["message"]["raw"]
+            return _Request({"id": kwargs["id"], "message": {"id": "message-1"}})
+
+        def send(self, **kwargs):
+            calls["send"] = kwargs
+            return _Request({"id": "message-1", "threadId": "thread-1"})
+
+    class _Client:
+        def get_service(self, api_name, api_version):
+            assert (api_name, api_version) == ("gmail", "v1")
+            return _Service(), False
+
+        def is_session_cached(self):
+            return False
+
+    monkeypatch.setattr(gm, "client", _Client())
+
+    read_result = json.loads(
+        asyncio.run(
+            gm.gmail_get_draft(
+                draft_id="draft-1",
+                format="metadata",
+                metadata_headers=["Subject"],
+            )
+        )
+    )
+    update_result = json.loads(
+        asyncio.run(
+            gm.gmail_update_draft(
+                draft_id="draft-1",
+                to="recipient@example.com",
+                subject="Updated",
+                body="Updated body",
+                expected_signature_fingerprint=signature.fingerprint,
+                confirm=True,
+            )
+        )
+    )
+    send_result = json.loads(
+        asyncio.run(
+            gm.gmail_send_draft(
+                draft_id="draft-1",
+                expected_signature_fingerprint=signature.fingerprint,
+                confirm=True,
+            )
+        )
+    )
+
+    assert read_result["ok"] is True
+    assert read_result["data"]["message"]["payload"]["headers"] == [
+        {"name": "Subject", "value": "Initial"}
+    ]
+    assert calls["get"] == {"userId": "me", "id": "draft-1", "format": "raw"}
+    assert calls["update"]["userId"] == "me"
+    assert calls["update"]["id"] == "draft-1"
+    assert update_result["ok"] is True
+    assert calls["send"] == {"userId": "me", "body": {"id": "draft-1"}}
+    assert send_result["ok"] is True
+
+
 def test_gmail_mailbox_overview_caps_labels(monkeypatch):
     class _FakeRequest:
         def __init__(self, data):

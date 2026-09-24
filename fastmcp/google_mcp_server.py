@@ -4949,10 +4949,20 @@ async def gmail_get_draft(
                 userId="me",
                 id=draft_id,
                 format=format,
-                metadataHeaders=effective_headers if format == "metadata" else None,
             )
         )
-        return request.execute(), {"cached_service": cached}
+        data = request.execute()
+        if format == "metadata":
+            requested_headers = {header.casefold() for header in effective_headers}
+            message = data.get("message", {})
+            payload = message.get("payload", {})
+            headers = payload.get("headers", []) or []
+            payload["headers"] = [
+                header
+                for header in headers
+                if str(header.get("name", "")).casefold() in requested_headers
+            ]
+        return data, {"cached_service": cached}
 
     return await run_tool("gmail", "get_draft", _get_draft, allow_retry=True)
 
