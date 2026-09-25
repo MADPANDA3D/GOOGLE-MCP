@@ -98,7 +98,8 @@ MCP_PROVIDER_ERROR_MAX_CHARS = max(int(os.getenv("MCP_PROVIDER_ERROR_MAX_CHARS",
 MCP_ALLOWED_HOSTS = tuple(
     host.strip().lower()
     for host in os.getenv(
-        "MCP_ALLOWED_HOSTS", "localhost,127.0.0.1,[::1],testserver,google-mcp"
+        "MCP_ALLOWED_HOSTS",
+        "localhost,127.0.0.1,[::1],testserver,google-mcp,google-mcp.madpanda3d.com",
     ).split(",")
     if host.strip()
 )
