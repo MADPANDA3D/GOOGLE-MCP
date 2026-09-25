@@ -9,7 +9,7 @@ os.environ.update(
         "MCP_MODE": "portal",
         "MCP_PORTAL_GRANT_TOKEN": TEST_PORTAL_GRANT_TOKEN,
         "MCP_ACCESS_TOKEN": "",
-        "MCP_ALLOWED_HOSTS": "localhost,127.0.0.1,[::1],testserver,google-mcp",
+        "MCP_ALLOWED_HOSTS": "localhost,127.0.0.1,[::1],testserver,google-mcp,google-mcp.madpanda3d.com",
         "MCP_ALLOWED_ORIGINS": "",
         "MCP_ALLOW_REQUEST_OVERRIDES": "true",
         "MCP_REQUIRE_REQUEST_GOOGLE_CLIENT_ID": "true",

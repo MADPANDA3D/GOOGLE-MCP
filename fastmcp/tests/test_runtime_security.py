@@ -45,6 +45,8 @@ def _portal_headers() -> dict[str, str]:
 
 
 def test_runtime_configuration_requires_mode_token_and_explicit_hosts(monkeypatch):
+    gm._validate_request_host({"host": "google-mcp.madpanda3d.com"})
+
     monkeypatch.setattr(gm, "MCP_MODE", "standalone")
     monkeypatch.setattr(gm, "MCP_ACCESS_TOKEN", "")
     with pytest.raises(gm.RuntimeConfigurationError, match="MCP_ACCESS_TOKEN"):
