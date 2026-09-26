@@ -1044,7 +1044,10 @@ def test_gmail_draft_read_update_send_uses_supported_provider_arguments(monkeypa
     assert calls["update"]["userId"] == "me"
     assert calls["update"]["id"] == "draft-1"
     assert update_result["ok"] is True
-    assert calls["send"] == {"userId": "me", "body": {"id": "draft-1"}}
+    assert calls["send"] == {
+        "userId": "me",
+        "body": {"id": "draft-1", "message": {"raw": state["raw"]}},
+    }
     assert send_result["ok"] is True
 
 
