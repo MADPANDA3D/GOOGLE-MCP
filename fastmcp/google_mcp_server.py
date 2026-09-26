@@ -4779,14 +4779,7 @@ async def gmail_send_draft(
                 "Gmail draft is missing the configured send-as signature. "
                 "Update the draft with gmail_update_draft before sending."
             )
-        request = (
-            service.users()
-            .drafts()
-            .send(
-                userId="me",
-                body={"id": draft_id, "message": {"raw": raw_message}},
-            )
-        )
+        request = service.users().drafts().send(userId="me", body={"id": draft_id})
         return request.execute(), {
             "cached_service": cached,
             "signature_verified": bool(signature.html),
