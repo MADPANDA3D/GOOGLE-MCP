@@ -60,6 +60,102 @@ def _mcp_client():
     return TestClient(app)
 
 
+def test_calendar_create_event_forwards_conference_and_attendee_update_options(monkeypatch):
+    captured = {}
+
+    class _Request:
+        def execute(self):
+            return {
+                "id": "event-1",
+                "hangoutLink": "https://meet.google.com/example",
+                "conferenceData": {"entryPoints": [{"entryPointType": "video"}]},
+            }
+
+    class _Service:
+        def events(self):
+            return self
+
+        def insert(self, **kwargs):
+            captured.update(kwargs)
+            return _Request()
+
+    class _Client:
+        def get_service(self, api_name, api_version):
+            assert (api_name, api_version) == ("calendar", "v3")
+            return _Service(), False
+
+        def is_session_cached(self):
+            return False
+
+    conference_data = {
+        "createRequest": {
+            "requestId": "unique-request-1",
+            "conferenceSolutionKey": {"type": "hangoutsMeet"},
+        }
+    }
+    monkeypatch.setattr(gm, "client", _Client())
+
+    payload = json.loads(
+        asyncio.run(
+            gm.calendar_create_event(
+                calendar_id="primary",
+                summary="Meet",
+                start_iso="2026-10-20T10:00:00Z",
+                end_iso="2026-10-20T11:00:00Z",
+                attendees=["guest@example.com"],
+                conference_data=conference_data,
+                send_updates="all",
+            )
+        )
+    )
+
+    assert captured["body"]["conferenceData"] == conference_data
+    assert captured["conferenceDataVersion"] == 1
+    assert captured["sendUpdates"] == "all"
+    assert payload["data"]["hangoutLink"] == "https://meet.google.com/example"
+    assert payload["data"]["conferenceData"]["entryPoints"][0]["entryPointType"] == "video"
+
+
+def test_calendar_create_event_without_conference_preserves_legacy_insert(monkeypatch):
+    captured = {}
+
+    class _Request:
+        def execute(self):
+            return {"id": "event-legacy"}
+
+    class _Service:
+        def events(self):
+            return self
+
+        def insert(self, **kwargs):
+            captured.update(kwargs)
+            return _Request()
+
+    class _Client:
+        def get_service(self, api_name, api_version):
+            assert (api_name, api_version) == ("calendar", "v3")
+            return _Service(), False
+
+        def is_session_cached(self):
+            return False
+
+    monkeypatch.setattr(gm, "client", _Client())
+    payload = json.loads(
+        asyncio.run(
+            gm.calendar_create_event(
+                calendar_id="primary",
+                summary="Legacy",
+                start_iso="2026-10-20T10:00:00Z",
+                end_iso="2026-10-20T11:00:00Z",
+            )
+        )
+    )
+
+    assert set(captured) == {"calendarId", "body"}
+    assert "conferenceData" not in captured["body"]
+    assert payload["data"]["id"] == "event-legacy"
+
+
 def test_missing_portal_grant_is_rejected_before_byok():
     app = _minimal_ok_app()
     headers = _mcp_headers()

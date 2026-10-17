@@ -6,9 +6,9 @@
 |---|---|
 | Schema version | `1.0.0` |
 | Service ID | `google` |
-| Catalog version | `google-2026.08.31.1` |
+| Catalog version | `google-2026.10.17.1` |
 | Native tools | 151 |
-| Descriptor hash | `26fd74c3fc50367ea4f4f8ae1f35ef09d43866f7cea085b852eaf120adb18487` |
+| Descriptor hash | Runtime-generated from the ordered descriptors |
 
 `list_capabilities(include_descriptors=true)` is the provider-owned source of
 truth for the runtime contract. It returns the complete ordered descriptor
