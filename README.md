@@ -273,6 +273,7 @@ Start from [`.env.example`](.env.example).
 | `MCP_MAX_DOWNLOAD_BYTES` | Optional | Bounds returned download content |
 | `MCP_REQUEST_BODY_MAX_BYTES` | Yes | Bounds inbound HTTP request bodies |
 | `MCP_PROVIDER_RESPONSE_MAX_BYTES` | Yes | Bounds directly streamed provider HTTP bodies before decoding |
+| `MCP_GOOGLE_HTTP_TIMEOUT_SECONDS` | Yes | Bounds each Google API transport attempt; public default `8.0` |
 | `MCP_TOOL_OUTPUT_MAX_BYTES` | Yes | Bounds serialized MCP tool output |
 | `MCP_MAX_BATCH_ITEMS` | Yes | Caps list-shaped input accepted by one tool call; public default `1000` |
 | `MCP_MAX_PROVIDER_CALLS_PER_TOOL` | Yes | Caps estimated provider fan-out from one tool call; public default `128` |
