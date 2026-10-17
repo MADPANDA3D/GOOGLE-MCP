@@ -24,7 +24,7 @@ def test_provider_manifest_is_complete_deterministic_and_lossless():
     assert manifest["schemaVersion"] == "1.0.0"
     assert manifest["serviceId"] == "google"
     assert manifest["catalogVersion"] == CATALOG_VERSION
-    assert CATALOG_VERSION == "google-2026.08.31.1"
+    assert CATALOG_VERSION == "google-2026.10.17.1"
     assert manifest["counts"] == {
         "raw": 151,
         "agentReady": 144,
@@ -34,7 +34,7 @@ def test_provider_manifest_is_complete_deterministic_and_lossless():
     assert len(manifest["tools"]) == 151
     assert manifest["descriptorHash"] == _canonical_hash(manifest["tools"])
     assert manifest["descriptorHash"] == (
-        "26fd74c3fc50367ea4f4f8ae1f35ef09d43866f7cea085b852eaf120adb18487"
+        "77764a71c76c356013bb186b12787729fc801f12a528e0ddaf25cbc6947f6af5"
     )
     assert STANDARD_NAVIGATION_TOOLS <= {item["nativeToolName"] for item in manifest["tools"]}
 
@@ -60,7 +60,7 @@ def test_provider_manifest_is_complete_deterministic_and_lossless():
         "156235e3f91fa345ae4e11308e20bddcd209822cc2cc1740e120dd6788cf52b6"
     )
     assert _canonical_hash(compatibility_projection) == (
-        "78f70e9968baeaf022d7d61a209a31dc967768748e72910231d78a440ef950a3"
+        "87707366837470096901831729cb1948a55085115b565ed2d99f41329f7d6aa9"
     )
 
     identities = set()
@@ -166,6 +166,19 @@ def test_gmail_attachment_descriptor_advertises_content_pagination():
     assert "decoded byte offset" in properties["offset"]["description"]
     assert properties["chunk_bytes"]["default"] == gm.DEFAULT_ATTACHMENT_CHUNK_BYTES
     assert "decoded attachment bytes" in properties["chunk_bytes"]["description"]
+
+
+def test_calendar_create_event_descriptor_advertises_conference_and_update_options():
+    descriptor = next(
+        item
+        for item in gm._current_tool_manifest()["tools"]
+        if item["nativeToolName"] == "calendar_create_event"
+    )
+    properties = descriptor["inputSchema"]["properties"]
+
+    assert properties["conference_data"]["default"] is None
+    assert properties["conference_data_version"]["default"] == 0
+    assert properties["send_updates"]["default"] == ""
 
 
 def test_manifest_preserves_legacy_and_advanced_contract_tiers():

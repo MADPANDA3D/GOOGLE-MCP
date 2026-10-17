@@ -2221,7 +2221,8 @@ TOOL_DESCRIPTIONS = {
     ),
     "calendar_create_event": (
         "Use this Google Calendar write tool to create an event in a calendar. It can "
-        "invite attendees and writes to the authenticated user's calendar."
+        "invite attendees, request conference creation, send attendee updates, and write "
+        "to the authenticated user's calendar."
     ),
     "calendar_update_event": (
         "Use this destructive Google Calendar tool to patch an existing event. It can "
@@ -5938,8 +5939,11 @@ async def calendar_create_event(
     location: str = "",
     attendees: list[str] | None = None,
     all_day: bool = False,
+    conference_data: dict[str, Any] | None = None,
+    conference_data_version: int = 0,
+    send_updates: str = "",
 ) -> str:
-    """Create a calendar event."""
+    """Create a calendar event, optionally with conference data and attendee updates."""
 
     def _create_event():
         if not calendar_id:
@@ -5962,7 +5966,17 @@ async def calendar_create_event(
             event["end"] = {"dateTime": end_iso, "timeZone": time_zone}
         if attendees:
             event["attendees"] = [{"email": email} for email in attendees]
-        request = service.events().insert(calendarId=calendar_id, body=event)
+        if conference_data:
+            event["conferenceData"] = conference_data
+        insert_kwargs: dict[str, Any] = {
+            "calendarId": calendar_id,
+            "body": event,
+        }
+        if conference_data or conference_data_version:
+            insert_kwargs["conferenceDataVersion"] = conference_data_version or 1
+        if send_updates:
+            insert_kwargs["sendUpdates"] = send_updates
+        request = service.events().insert(**insert_kwargs)
         return request.execute(), {"cached_service": cached}
 
     return await run_tool("calendar", "create_event", _create_event, allow_retry=False)

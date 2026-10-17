@@ -2,6 +2,15 @@
 
 All notable public releases are documented here.
 
+## Unreleased
+
+- Added optional conference data, conference data version, and attendee update
+  delivery controls to `calendar_create_event`.
+- Automatically sends `conferenceDataVersion=1` when conference creation is
+  requested and preserves Google conference links and entry points in output.
+- Advanced the provider catalog to `google-2026.10.17.1` without changing any
+  native tool identity, risk class, or confirmation behavior.
+
 ## 1.0.3 — 2026-08-31
 
 - Added decoded-byte pagination to `gmail_get_attachment` through `offset` and
