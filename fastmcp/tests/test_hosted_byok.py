@@ -1840,6 +1840,32 @@ def test_refresh_error_is_classified_as_auth_error():
     assert payload["error"]["type"] == "auth_error"
 
 
+def test_google_service_transport_uses_bounded_timeout(monkeypatch):
+    class _FakeCreds:
+        valid = True
+
+    class _FakeTransport:
+        timeout = None
+
+    class _FakeService:
+        _http = _FakeTransport()
+
+    monkeypatch.setattr(gm, "build", lambda *args, **kwargs: _FakeService())
+    workspace = gm.GoogleWorkspaceClient(
+        credentials_path=None,
+        token_path=None,
+        scopes=["scope"],
+        authorized_user_info={"refresh_token": "synthetic"},
+        persist_token=False,
+    )
+    monkeypatch.setattr(workspace, "_load_credentials", lambda: _FakeCreds())
+
+    service, cached = workspace.get_service("gmail", "v1")
+
+    assert cached is False
+    assert service._http.timeout == gm.MCP_GOOGLE_HTTP_TIMEOUT_SECONDS
+
+
 def test_concurrent_requests_keep_client_context_isolated(monkeypatch):
     class _NamedClient:
         def __init__(self, name: str):

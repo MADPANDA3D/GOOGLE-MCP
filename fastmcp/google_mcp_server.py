@@ -10,6 +10,7 @@ import logging
 import os
 import random
 import re
+import socket
 import tempfile
 import threading
 import time
@@ -122,6 +123,10 @@ MCP_LOG_LEVEL = os.getenv("MCP_LOG_LEVEL", "INFO")
 MCP_RETRY_MAX = int(os.getenv("MCP_RETRY_MAX", "2"))
 MCP_RETRY_BASE_SECONDS = float(os.getenv("MCP_RETRY_BASE_SECONDS", "0.5"))
 MCP_RETRY_MAX_SECONDS = float(os.getenv("MCP_RETRY_MAX_SECONDS", "4.0"))
+MCP_GOOGLE_HTTP_TIMEOUT_SECONDS = max(
+    float(os.getenv("MCP_GOOGLE_HTTP_TIMEOUT_SECONDS", "8.0")),
+    1.0,
+)
 MCP_MAX_BATCH_ITEMS = max(1, min(int(os.getenv("MCP_MAX_BATCH_ITEMS", "1000")), 10000))
 MCP_MAX_PROVIDER_CALLS_PER_TOOL = max(
     1,
@@ -317,6 +322,9 @@ class GoogleWorkspaceClient:
             if cache_key in self._service_cache:
                 return self._service_cache[cache_key], True
             service = build(api_name, api_version, credentials=creds, cache_discovery=False)
+            transport = getattr(service, "_http", None)
+            if transport is not None and hasattr(transport, "timeout"):
+                transport.timeout = MCP_GOOGLE_HTTP_TIMEOUT_SECONDS
             self._service_cache[cache_key] = service
             return service, False
 
@@ -850,6 +858,12 @@ def _classify_error(exc: Exception) -> dict[str, Any]:
             "message": "Google OAuth credential refresh failed.",
             "action": "Verify the request-scoped Google OAuth credentials.",
         }
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return {
+            "type": "upstream_timeout",
+            "message": "Google API request timed out.",
+            "action": "Retry the request or narrow the query.",
+        }
     if isinstance(exc, HttpError):
         status = getattr(exc, "status_code", None)
         if status is None and getattr(exc, "resp", None) is not None:
@@ -885,6 +899,8 @@ def _classify_error(exc: Exception) -> dict[str, Any]:
 
 
 def _is_retryable(exc: Exception) -> bool:
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return True
     if not isinstance(exc, HttpError):
         return False
     status = getattr(exc, "status_code", None)
@@ -983,6 +999,7 @@ async def run_tool(
     func: Callable[[], Any],
     *,
     allow_retry: bool = True,
+    max_retries: int | None = None,
     meta_extra: dict[str, Any] | None = None,
     suggested_fields: str | None = None,
 ) -> str:
@@ -990,6 +1007,7 @@ async def run_tool(
     start = time.perf_counter()
     retries = 0
     last_error: dict[str, Any] | None = None
+    retry_limit = MCP_RETRY_MAX if max_retries is None else max(0, max_retries)
     while True:
         try:
             result = await run_blocking(func)
@@ -1027,7 +1045,7 @@ async def run_tool(
             last_error = _classify_error(exc)
             if suggested_fields:
                 last_error["suggested_fields"] = suggested_fields
-            if allow_retry and retries < MCP_RETRY_MAX and _is_retryable(exc):
+            if allow_retry and retries < retry_limit and _is_retryable(exc):
                 delay = _retry_delay_seconds(exc, retries + 1)
                 retries += 1
                 await asyncio.sleep(delay)
@@ -4315,7 +4333,13 @@ async def gmail_search_messages(
         data = request.execute()
         return _attach_page_meta(data, cached)
 
-    return await run_tool("gmail", "search_messages", _search_messages, allow_retry=True)
+    return await run_tool(
+        "gmail",
+        "search_messages",
+        _search_messages,
+        allow_retry=True,
+        max_retries=1,
+    )
 
 
 @mcp.tool()

@@ -290,6 +290,48 @@ def test_tool_output_and_provider_errors_are_bounded_and_redacted(monkeypatch):
     assert "[REDACTED]" in error["message"]
 
 
+def test_transport_timeout_is_classified_and_retried_within_explicit_limit(monkeypatch):
+    attempts = 0
+
+    def _timeout_once():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise TimeoutError("synthetic provider stall")
+        return {"messages": [{"id": "message-1"}]}
+
+    monkeypatch.setattr(gm, "_retry_delay_seconds", lambda exc, attempt: 0)
+    payload = json.loads(
+        asyncio.run(
+            gm.run_tool(
+                "gmail",
+                "search_messages",
+                _timeout_once,
+                allow_retry=True,
+                max_retries=1,
+            )
+        )
+    )
+
+    assert payload["ok"] is True
+    assert payload["meta"]["retry_count"] == 1
+    assert attempts == 2
+
+    failed = json.loads(
+        asyncio.run(
+            gm.run_tool(
+                "gmail",
+                "search_messages",
+                lambda: (_ for _ in ()).throw(TimeoutError("synthetic provider stall")),
+                allow_retry=True,
+                max_retries=0,
+            )
+        )
+    )
+    assert failed["ok"] is False
+    assert failed["error"]["type"] == "upstream_timeout"
+
+
 def test_direct_provider_responses_are_bounded_before_json_decode(monkeypatch):
     monkeypatch.setattr(gm, "MCP_PROVIDER_RESPONSE_MAX_BYTES", 4096)
 
