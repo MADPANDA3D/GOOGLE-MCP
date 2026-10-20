@@ -1456,6 +1456,124 @@ def test_drive_upload_file_direct_mode_uses_compact_fields(monkeypatch):
     assert captured["media_body"].size() == 5
 
 
+def test_drive_download_file_allows_bounded_range_of_large_file(monkeypatch):
+    content = b"x" * 1024
+
+    class _FakeRequest:
+        def execute(self):
+            return {
+                "id": "recording-1",
+                "name": "recording.mp4",
+                "mimeType": "video/mp4",
+                "size": "1051451819",
+            }
+
+    class _FakeFiles:
+        def get(self, **kwargs):
+            assert kwargs["fileId"] == "recording-1"
+            return _FakeRequest()
+
+    class _FakeDriveService:
+        def files(self):
+            return _FakeFiles()
+
+    class _FakeResponse:
+        ok = True
+        status_code = 206
+        headers = {"content-length": "1024"}
+
+        def iter_content(self, chunk_size):
+            assert chunk_size == 1024 * 256
+            yield content
+
+        def close(self):
+            pass
+
+    class _FakeSession:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, url, **kwargs):
+            self.calls.append((url, kwargs))
+            return _FakeResponse()
+
+    session = _FakeSession()
+
+    class _FakeClient:
+        def get_service(self, api_name, api_version):
+            assert (api_name, api_version) == ("drive", "v3")
+            return _FakeDriveService(), False
+
+        def get_session(self):
+            return session, False
+
+    monkeypatch.setattr(gm, "client", _FakeClient())
+
+    payload = json.loads(
+        asyncio.run(
+            gm.drive_download_file(
+                file_id="recording-1",
+                return_mode="base64",
+                max_bytes=1024,
+                range_start=0,
+                range_end=1023,
+            )
+        )
+    )
+
+    assert payload["ok"] is True
+    assert payload["data"]["content_bytes"] == 1024
+    assert base64.b64decode(payload["data"]["content_base64"]) == content
+    assert "too_large" not in payload["data"]
+    assert session.calls[0][1]["headers"] == {"Range": "bytes=0-1023"}
+
+
+def test_drive_download_file_still_rejects_large_full_download_before_fetch(monkeypatch):
+    class _FakeRequest:
+        def execute(self):
+            return {
+                "id": "recording-1",
+                "name": "recording.mp4",
+                "mimeType": "video/mp4",
+                "size": "1051451819",
+            }
+
+    class _FakeFiles:
+        def get(self, **_kwargs):
+            return _FakeRequest()
+
+    class _FakeDriveService:
+        def files(self):
+            return _FakeFiles()
+
+    class _FakeClient:
+        def get_service(self, _api_name, _api_version):
+            return _FakeDriveService(), False
+
+        def get_session(self):
+            raise AssertionError("oversized full downloads must not fetch content")
+
+        def is_session_cached(self):
+            return False
+
+    monkeypatch.setattr(gm, "client", _FakeClient())
+
+    payload = json.loads(
+        asyncio.run(
+            gm.drive_download_file(
+                file_id="recording-1",
+                return_mode="base64",
+                max_bytes=1024,
+            )
+        )
+    )
+
+    assert payload["ok"] is True
+    assert payload["data"]["too_large"] is True
+    assert payload["data"]["size"] == 1051451819
+    assert payload["data"]["max_bytes"] == 1024
+
+
 def test_drive_upload_file_resumable_mode_starts_metadata_only_session(monkeypatch):
     captured = {}
 

@@ -3177,22 +3177,9 @@ async def drive_download_file(
         if not include_data:
             return response_payload, {"cached_service": cached_service}
 
-        size = metadata.get("size")
-        if size is not None:
-            try:
-                size_int = int(size)
-            except (TypeError, ValueError):
-                size_int = None
-            else:
-                if size_int > effective_max_bytes:
-                    response_payload["too_large"] = True
-                    response_payload["size"] = size_int
-                    response_payload["max_bytes"] = effective_max_bytes
-                    return response_payload, {"cached_service": cached_service}
-
-        session, cached_session = client.get_session()
         headers: dict[str, str] = {}
-        if range_start is not None or range_end is not None:
+        range_requested = range_start is not None or range_end is not None
+        if range_requested:
             if range_start is not None and range_start < 0:
                 raise ValueError("range_start must be non-negative.")
             if range_end is not None and range_end < 0:
@@ -3202,6 +3189,21 @@ async def drive_download_file(
             start = range_start or 0
             end = "" if range_end is None else str(range_end)
             headers["Range"] = f"bytes={start}-{end}"
+
+        size = metadata.get("size")
+        if size is not None:
+            try:
+                size_int = int(size)
+            except (TypeError, ValueError):
+                size_int = None
+            else:
+                if not range_requested and size_int > effective_max_bytes:
+                    response_payload["too_large"] = True
+                    response_payload["size"] = size_int
+                    response_payload["max_bytes"] = effective_max_bytes
+                    return response_payload, {"cached_service": cached_service}
+
+        session, cached_session = client.get_session()
         response = session.get(download_url, headers=headers, stream=True)
         if not response.ok:
             raise RuntimeError(f"Drive download failed with status {response.status_code}.")
