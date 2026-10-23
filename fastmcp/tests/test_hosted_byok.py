@@ -60,6 +60,71 @@ def _mcp_client():
     return TestClient(app)
 
 
+def test_gmail_list_labels_uses_bounded_direct_request(monkeypatch):
+    captured = {}
+
+    class _Response:
+        status_code = 200
+        ok = True
+        headers = {"content-type": "application/json"}
+
+        def iter_content(self, chunk_size):
+            assert chunk_size == 64 * 1024
+            yield b'{"labels":[{"id":"INBOX","name":"INBOX","messagesTotal":4}]}'
+
+        def close(self):
+            captured["closed"] = True
+
+    class _Session:
+        def get(self, url, **kwargs):
+            captured["url"] = url
+            captured.update(kwargs)
+            return _Response()
+
+    class _Client:
+        def get_session(self):
+            return _Session(), False
+
+        def is_session_cached(self):
+            return True
+
+    monkeypatch.setattr(gm, "client", _Client())
+    monkeypatch.setattr(gm, "MCP_PROVIDER_TIMEOUT_SECONDS", 7.5)
+
+    payload = json.loads(asyncio.run(gm.gmail_list_labels(minimal=True)))
+
+    assert captured["url"] == "https://gmail.googleapis.com/gmail/v1/users/me/labels"
+    assert captured["params"] == {"fields": "labels(id,name)"}
+    assert captured["timeout"] == 7.5
+    assert captured["stream"] is True
+    assert captured["allow_redirects"] is False
+    assert captured["closed"] is True
+    assert payload["data"] == {"labels": [{"id": "INBOX", "name": "INBOX"}]}
+    assert payload["meta"]["cached_session"] is False
+
+
+def test_authorized_session_bounds_oauth_refresh(monkeypatch):
+    captured = {}
+    session = object()
+
+    def _authorized_session(credentials, **kwargs):
+        captured["credentials"] = credentials
+        captured.update(kwargs)
+        return session
+
+    credentials = SimpleNamespace(valid=True)
+    client = gm.GoogleWorkspaceClient(None, None, [])
+    client._creds = credentials
+    monkeypatch.setattr(gm, "AuthorizedSession", _authorized_session)
+    monkeypatch.setattr(gm, "MCP_PROVIDER_TIMEOUT_SECONDS", 7.5)
+
+    result, cached = client.get_session()
+
+    assert result is session
+    assert cached is False
+    assert captured == {"credentials": credentials, "refresh_timeout": 7.5}
+
+
 def test_calendar_create_event_forwards_conference_and_attendee_update_options(monkeypatch):
     captured = {}
 

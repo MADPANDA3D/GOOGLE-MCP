@@ -93,6 +93,10 @@ MCP_PROVIDER_RESPONSE_MAX_BYTES = max(
     int(os.getenv("MCP_PROVIDER_RESPONSE_MAX_BYTES", "4194304")),
     4096,
 )
+MCP_PROVIDER_TIMEOUT_SECONDS = max(
+    float(os.getenv("MCP_PROVIDER_TIMEOUT_SECONDS", "12")),
+    1.0,
+)
 MCP_TOOL_OUTPUT_MAX_BYTES = max(int(os.getenv("MCP_TOOL_OUTPUT_MAX_BYTES", "1048576")), 4096)
 MCP_PROVIDER_ERROR_MAX_CHARS = max(int(os.getenv("MCP_PROVIDER_ERROR_MAX_CHARS", "1024")), 128)
 MCP_ALLOWED_HOSTS = tuple(
@@ -328,7 +332,10 @@ class GoogleWorkspaceClient:
         creds = self._load_credentials()
         with self._lock:
             if self._session is None:
-                self._session = AuthorizedSession(creds)
+                self._session = AuthorizedSession(
+                    creds,
+                    refresh_timeout=MCP_PROVIDER_TIMEOUT_SECONDS,
+                )
                 return self._session, False
             return self._session, True
 
@@ -4163,7 +4170,7 @@ async def gmail_list_labels(
     """List Gmail labels for the authenticated user."""
 
     def _list_labels():
-        service, cached = client.get_service("gmail", "v1")
+        session, cached = client.get_session()
         warnings: list[str] = []
         if fields is not None and not isinstance(fields, str):
             if MCP_STRICT_PARAMS:
@@ -4181,15 +4188,29 @@ async def gmail_list_labels(
                 effective_fields = "labels(id,name)"
         else:
             effective_fields = ""
-        request = (
-            service.users()
-            .labels()
-            .list(
-                userId="me",
-                fields=effective_fields or None,
-            )
+        response = session.get(
+            "https://gmail.googleapis.com/gmail/v1/users/me/labels",
+            params=_clean_query_params({"fields": effective_fields or None}),
+            stream=True,
+            allow_redirects=False,
+            timeout=MCP_PROVIDER_TIMEOUT_SECONDS,
         )
-        data = request.execute()
+        payload = _bounded_provider_payload(response, "Gmail")
+        if not response.ok:
+            raise _provider_error(
+                "Gmail",
+                payload,
+                status=response.status_code,
+                retry_after=_retry_after_seconds(dict(response.headers or {})),
+            )
+        data = payload.get("json")
+        if not isinstance(data, dict):
+            raise GoogleProviderError(
+                "Gmail returned a non-object label response.",
+                error_type="invalid_provider_response",
+                status=response.status_code,
+                action="Retry the Gmail label request.",
+            )
         if minimal and not field_text:
             labels = [
                 {
@@ -4206,11 +4227,11 @@ async def gmail_list_labels(
                 }
                 for label in data.get("labels", []) or []
             ]
-            meta = {"cached_service": cached}
+            meta = {"cached_session": cached}
             if warnings:
                 meta["warnings"] = warnings
             return {"labels": labels}, meta
-        meta = {"cached_service": cached}
+        meta = {"cached_session": cached}
         if warnings:
             meta["warnings"] = warnings
         return data, meta
