@@ -1335,6 +1335,79 @@ def test_gmail_metadata_fetch_uses_google_batch_requests():
     assert results[0]["headers"]["from"] == "News <news@example.com>"
 
 
+def test_gmail_batch_get_metadata_batches_one_hundred_messages(monkeypatch):
+    batch_sizes = []
+
+    class _FakeRequest:
+        def __init__(self, message_id):
+            self.message_id = message_id
+
+        def execute(self):  # pragma: no cover - batch path should not call this
+            raise AssertionError("sequential get should not run")
+
+    class _FakeBatch:
+        def __init__(self, callback):
+            self.callback = callback
+            self.requests = []
+
+        def add(self, request, request_id):
+            self.requests.append((request_id, request))
+
+        def execute(self):
+            batch_sizes.append(len(self.requests))
+            for request_id, request in reversed(self.requests):
+                self.callback(
+                    request_id,
+                    {
+                        "id": request.message_id,
+                        "threadId": f"t-{request.message_id}",
+                        "payload": {
+                            "headers": [{"name": "Subject", "value": request.message_id}]
+                        },
+                    },
+                    None,
+                )
+
+    class _FakeService:
+        def users(self):
+            return self
+
+        def messages(self):
+            return self
+
+        def get(self, **kwargs):
+            assert kwargs["metadataHeaders"] == ["Subject"]
+            assert kwargs["fields"] == "id,threadId,labelIds,snippet,internalDate,payload/headers"
+            return _FakeRequest(kwargs["id"])
+
+        def new_batch_http_request(self, callback):
+            return _FakeBatch(callback)
+
+    class _FakeClient:
+        def get_service(self, api_name, api_version):
+            assert (api_name, api_version) == ("gmail", "v1")
+            return _FakeService(), False
+
+        def is_session_cached(self):
+            return False
+
+    monkeypatch.setattr(gm, "client", _FakeClient())
+    payload = json.loads(
+        asyncio.run(
+            gm.gmail_batch_get_metadata(
+                [f"m{index}" for index in range(100)],
+                metadata_headers=["Subject"],
+            )
+        )
+    )
+
+    assert payload["ok"] is True
+    assert batch_sizes == [gm.GMAIL_METADATA_BATCH_SIZE] * 20
+    assert [message["id"] for message in payload["data"]["messages"]] == [
+        f"m{index}" for index in range(100)
+    ]
+
+
 def test_workspace_create_tools_request_compact_fields(monkeypatch):
     captured = {}
 
