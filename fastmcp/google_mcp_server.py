@@ -272,6 +272,7 @@ class GoogleWorkspaceClient:
         self.authorized_user_info = authorized_user_info
         self.persist_token = persist_token
         self._lock = threading.Lock()
+        self._service_execution_locks: dict[tuple[str, str], threading.Lock] = {}
         self._creds: Credentials | None = None
         self._service_cache: dict[tuple[str, str, tuple[str, ...]], Any] = {}
         self._session: AuthorizedSession | None = None
@@ -319,6 +320,20 @@ class GoogleWorkspaceClient:
             service = build(api_name, api_version, credentials=creds, cache_discovery=False)
             self._service_cache[cache_key] = service
             return service, False
+
+    def execute_with_service(
+        self,
+        api_name: str,
+        api_version: str,
+        operation: Callable[[Any], Any],
+    ) -> tuple[Any, bool]:
+        """Build and execute one request without overlapping a cached service transport."""
+        lock_key = (api_name, api_version)
+        with self._lock:
+            execution_lock = self._service_execution_locks.setdefault(lock_key, threading.Lock())
+        with execution_lock:
+            service, cached = self.get_service(api_name, api_version)
+            return operation(service), cached
 
     def build_service(self, api_name: str, api_version: str):
         service, _ = self.get_service(api_name, api_version)
@@ -4882,9 +4897,12 @@ async def gmail_get_label(label_id: str) -> str:
     def _get_label():
         if not label_id:
             raise ValueError("label_id cannot be empty")
-        service, cached = client.get_service("gmail", "v1")
-        request = service.users().labels().get(userId="me", id=label_id)
-        return request.execute(), {"cached_service": cached}
+        result, cached = client.execute_with_service(
+            "gmail",
+            "v1",
+            lambda service: service.users().labels().get(userId="me", id=label_id).execute(),
+        )
+        return result, {"cached_service": cached}
 
     return await run_tool("gmail", "get_label", _get_label, allow_retry=True)
 
