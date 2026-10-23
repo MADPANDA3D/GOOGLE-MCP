@@ -1,5 +1,6 @@
 import asyncio
 import json
+import ssl
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1212,6 +1213,57 @@ def test_gmail_mailbox_overview_caps_labels(monkeypatch):
     assert payload["data"]["labels_total"] == 3
     assert payload["data"]["labels_returned"] == 2
     assert [label["id"] for label in payload["data"]["labels"]] == ["A", "B"]
+
+
+def test_gmail_mailbox_overview_retries_tls_failure_with_fresh_transport(monkeypatch):
+    state = {"executions": 0, "transport_discards": 0}
+
+    class _FakeRequest:
+        def execute(self):
+            state["executions"] += 1
+            if state["executions"] == 1:
+                raise ssl.SSLError(1, "unexpected record")
+            return {"resultSizeEstimate": 7, "messages": [{"id": "m1"}]}
+
+    class _FakeMessages:
+        def list(self, **kwargs):
+            return _FakeRequest()
+
+    class _FakeUsers:
+        def messages(self):
+            return _FakeMessages()
+
+    class _FakeService:
+        def users(self):
+            return _FakeUsers()
+
+    class _FakeClient:
+        def get_service(self, api_name, api_version):
+            assert (api_name, api_version) == ("gmail", "v1")
+            return _FakeService(), False
+
+        def discard_cached_transports(self):
+            state["transport_discards"] += 1
+
+        def is_session_cached(self):
+            return False
+
+    monkeypatch.setattr(gm, "client", _FakeClient())
+    monkeypatch.setattr(gm, "MCP_RETRY_BASE_SECONDS", 0)
+    monkeypatch.setattr(gm, "MCP_RETRY_MAX_SECONDS", 0)
+
+    payload = json.loads(
+        asyncio.run(
+            gm.gmail_mailbox_overview(
+                queries=["is:unread"],
+                include_labels=False,
+            )
+        )
+    )
+
+    assert payload["ok"] is True
+    assert payload["meta"]["retry_count"] == 1
+    assert state == {"executions": 2, "transport_discards": 1}
 
 
 def test_gmail_sender_clusters_obeys_sample_limit(monkeypatch):

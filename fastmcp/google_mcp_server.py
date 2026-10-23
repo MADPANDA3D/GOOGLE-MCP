@@ -10,6 +10,7 @@ import logging
 import os
 import random
 import re
+import ssl
 import tempfile
 import threading
 import time
@@ -344,6 +345,12 @@ class GoogleWorkspaceClient:
     def is_session_cached(self) -> bool:
         with self._lock:
             return self._session is not None
+
+    def discard_cached_transports(self) -> None:
+        """Discard provider transports after a retryable connection failure."""
+        with self._lock:
+            self._service_cache.clear()
+            self._session = None
 
 
 @dataclass(frozen=True)
@@ -850,6 +857,12 @@ def _classify_error(exc: Exception) -> dict[str, Any]:
             "message": "Google OAuth credential refresh failed.",
             "action": "Verify the request-scoped Google OAuth credentials.",
         }
+    if isinstance(exc, ssl.SSLError):
+        return {
+            "type": "transport_error",
+            "message": "The TLS connection to Google failed.",
+            "action": "Retry the request after a short delay.",
+        }
     if isinstance(exc, HttpError):
         status = getattr(exc, "status_code", None)
         if status is None and getattr(exc, "resp", None) is not None:
@@ -885,6 +898,8 @@ def _classify_error(exc: Exception) -> dict[str, Any]:
 
 
 def _is_retryable(exc: Exception) -> bool:
+    if isinstance(exc, ssl.SSLError):
+        return True
     if not isinstance(exc, HttpError):
         return False
     status = getattr(exc, "status_code", None)
@@ -1030,6 +1045,8 @@ async def run_tool(
             if allow_retry and retries < MCP_RETRY_MAX and _is_retryable(exc):
                 delay = _retry_delay_seconds(exc, retries + 1)
                 retries += 1
+                if isinstance(exc, ssl.SSLError):
+                    client.discard_cached_transports()
                 await asyncio.sleep(delay)
                 continue
             meta = {
