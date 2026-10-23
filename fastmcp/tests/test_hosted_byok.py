@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -1912,6 +1913,59 @@ def test_concurrent_requests_keep_client_context_isolated(monkeypatch):
     first, second = asyncio.run(_run())
     assert first == "alpha"
     assert second == "beta"
+
+
+def test_concurrent_gmail_label_reads_keep_arguments_and_results_isolated(monkeypatch):
+    class _Request:
+        def __init__(self, resource, label_id):
+            self.resource = resource
+            self.label_id = label_id
+
+        def execute(self):
+            self.resource.active_label_id = self.label_id
+            time.sleep(0.02)
+            return {"id": self.resource.active_label_id}
+
+    class _Labels:
+        def __init__(self):
+            self.active_label_id = None
+
+        def get(self, *, userId, id):
+            assert userId == "me"
+            return _Request(self, id)
+
+    class _Users:
+        def __init__(self, labels):
+            self._labels = labels
+
+        def labels(self):
+            return self._labels
+
+    class _Service:
+        def __init__(self):
+            self._labels = _Labels()
+
+        def users(self):
+            return _Users(self._labels)
+
+    workspace = gm.GoogleWorkspaceClient(None, None, list(gm.SCOPES))
+    service = _Service()
+    monkeypatch.setattr(workspace, "_load_credentials", lambda: object())
+    monkeypatch.setattr(gm, "build", lambda *args, **kwargs: service)
+    token = gm.ACTIVE_GOOGLE_CLIENT.set(workspace)
+    try:
+        async def _run():
+            return await asyncio.gather(
+                gm.gmail_get_label("UNREAD"),
+                gm.gmail_get_label("SPAM"),
+            )
+
+        unread_blob, spam_blob = asyncio.run(_run())
+    finally:
+        gm.ACTIVE_GOOGLE_CLIENT.reset(token)
+
+    assert json.loads(unread_blob)["data"]["id"] == "UNREAD"
+    assert json.loads(spam_blob)["data"]["id"] == "SPAM"
 
 
 def test_raw_request_unconditionally_blocks_non_google_hosts():
