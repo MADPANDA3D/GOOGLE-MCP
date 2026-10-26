@@ -79,6 +79,7 @@ DEFAULT_GMAIL_METADATA_HEADERS = (
     "Message-ID",
 )
 GMAIL_METADATA_BATCH_SIZE = 5
+GMAIL_TRANSIENT_READ_LOCK = threading.Lock()
 GMAIL_SIGNATURE_MARKER = "data-madpanda-gmail-signature"
 DEFAULT_GMAIL_BODY_MAX_CHARS = 8000
 MAX_GMAIL_BODY_MAX_CHARS = 100000
@@ -4299,20 +4300,21 @@ async def gmail_search_messages(
     def _search_messages():
         if not query:
             raise ValueError("query cannot be empty")
-        service, cached = client.get_service("gmail", "v1")
-        request = (
-            service.users()
-            .messages()
-            .list(
-                userId="me",
-                q=query,
-                labelIds=label_ids or None,
-                maxResults=max_results,
-                includeSpamTrash=include_spam_trash,
-                pageToken=page_token or None,
+        with GMAIL_TRANSIENT_READ_LOCK:
+            service, cached = client.get_service("gmail", "v1")
+            request = (
+                service.users()
+                .messages()
+                .list(
+                    userId="me",
+                    q=query,
+                    labelIds=label_ids or None,
+                    maxResults=max_results,
+                    includeSpamTrash=include_spam_trash,
+                    pageToken=page_token or None,
+                )
             )
-        )
-        data = request.execute()
+            data = request.execute()
         return _attach_page_meta(data, cached)
 
     return await run_tool("gmail", "search_messages", _search_messages, allow_retry=True)
@@ -4454,24 +4456,19 @@ async def gmail_batch_get_metadata(
     def _batch_get():
         if not message_ids:
             raise ValueError("message_ids cannot be empty")
-        _validate_fanout_items(message_ids, "message_ids")
-        service, cached = client.get_service("gmail", "v1")
-        effective_headers = metadata_headers or list(DEFAULT_GMAIL_METADATA_HEADERS)
-        results = []
-        for message_id in message_ids:
-            if not message_id:
-                continue
-            request = (
-                service.users()
-                .messages()
-                .get(
-                    userId="me",
-                    id=message_id,
-                    format="metadata",
-                    metadataHeaders=effective_headers,
-                )
+        _validate_fanout_items(
+            message_ids,
+            "message_ids",
+            items_per_provider_call=GMAIL_METADATA_BATCH_SIZE,
+        )
+        with GMAIL_TRANSIENT_READ_LOCK:
+            service, cached = client.get_service("gmail", "v1")
+            results = _gmail_get_metadata_batch(
+                service,
+                message_ids,
+                metadata_headers or list(DEFAULT_GMAIL_METADATA_HEADERS),
+                max_messages=len(message_ids),
             )
-            results.append(request.execute())
         return {"messages": results}, {"cached_service": cached}
 
     return await run_tool("gmail", "batch_get_metadata", _batch_get, allow_retry=True)
