@@ -203,6 +203,8 @@ if MCP_LOG_REQUESTS:
         level=getattr(logging, MCP_LOG_LEVEL.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(message)s",
     )
+# urllib3 DEBUG records include full request targets, including unsubscribe tokens.
+logging.getLogger("urllib3.connectionpool").setLevel(logging.INFO)
 
 
 def _write_private_text(path: str, value: str) -> None:
@@ -1676,14 +1678,20 @@ def _gmail_verified_one_click_headers(raw_message: bytes) -> dict[str, str]:
     required = {b"from", b"list-unsubscribe", b"list-unsubscribe-post"}
     for index, signature in enumerate(signatures):
         signed = re.search(rb"(?:^|;)\s*h\s*=\s*([^;]+)", signature, re.IGNORECASE)
-        if not signed or not required <= {part.strip().lower() for part in signed[1].split(b":")}:
+        if not signed:
+            continue
+        signed_headers = {part.strip().lower() for part in signed[1].split(b":")}
+        if not required <= signed_headers:
             continue
         try:
             if verifier.verify(idx=index):
-                return {
+                verified_headers = {
                     name.decode("ascii", "ignore"): value.decode("utf-8", "replace").strip()
                     for name, value in headers
                 }
+                if names.count(b"list-id") != 1 or b"list-id" not in signed_headers:
+                    verified_headers.pop("list-id", None)
+                return verified_headers
         except Exception:
             # DNS and malformed-signature failures must fail closed without exposing header data.
             continue
@@ -4641,7 +4649,7 @@ def _gmail_one_click_unsubscribe_operation(
     if not raw_message or len(raw_message) > MAX_GMAIL_UNSUBSCRIBE_RAW_BYTES:
         raise ValueError("Message is too large for safe one-click unsubscribe verification.")
     headers = _gmail_verified_one_click_headers(raw_message)
-    unsubscribe_url, address = _gmail_one_click_unsubscribe_url(headers, resolve_host=execute)
+    unsubscribe_url, address = _gmail_one_click_unsubscribe_url(headers, resolve_host=True)
     sender = _gmail_sender_key(headers)
     if not sender["sender_email"] or sender["sender_email"].count("@") != 1:
         raise ValueError("Message From header does not identify a valid sender.")

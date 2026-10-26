@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -172,6 +173,7 @@ def test_gmail_one_click_unsubscribe_previews_without_exposing_or_posting(monkey
     assert payload["data"]["one_click_eligible"] is True
     assert payload["data"]["executed"] is False
     assert payload["data"]["sender_email"] == "team@bark.com"
+    assert payload["data"]["list_id"] == "bark.com"
     assert payload["data"]["unsubscribe_url_redacted"] is True
     assert secret_url not in raw
     assert "secret-token" not in raw
@@ -282,7 +284,9 @@ def test_gmail_one_click_unsubscribe_rejects_duplicate_and_unsigned_headers(monk
     raw = (
         "\r\n".join(f"{item['name']}: {item['value']}" for item in headers) + "\r\n\r\nbody"
     ).encode()
-    assert gm._gmail_verified_one_click_headers(raw)["from"] == "Bark Team <team@bark.com>"
+    verified = gm._gmail_verified_one_click_headers(raw)
+    assert verified["from"] == "Bark Team <team@bark.com>"
+    assert "list-id" not in verified
 
     duplicate = raw.replace(
         b"List-Unsubscribe-Post:",
@@ -371,6 +375,27 @@ def test_gmail_one_click_unsubscribe_rejects_private_dns_answer(monkeypatch):
         )
 
 
+def test_gmail_one_click_unsubscribe_preview_rejects_private_destination(monkeypatch):
+    _mock_valid_dkim(monkeypatch)
+    headers = _eligible_unsubscribe_headers("https://unsubscribe.bark.com/u")
+    monkeypatch.setattr(gm, "client", _UnsubscribeClient(_UnsubscribeService(headers=headers)))
+    monkeypatch.setattr(
+        gm.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(None, None, None, None, ("127.0.0.1", 443))],
+    )
+    payload = json.loads(
+        asyncio.run(
+            gm.gmail_preview_one_click_unsubscribe(
+                message_id="message-1",
+                expected_mailbox="leolara@madpanda3d.com",
+            )
+        )
+    )
+    assert payload["ok"] is False
+    assert "not public" in payload["error"]["message"]
+
+
 def test_gmail_one_click_unsubscribe_redacts_provider_failure(monkeypatch):
     _mock_valid_dkim(monkeypatch)
     secret_url = "https://unsubscribe.bark.com/u?opaque=secret-token"
@@ -440,6 +465,13 @@ def test_gmail_unsubscribe_http_post_uses_rfc8058_body_and_disables_redirects(mo
     assert captured["retries"] is False
     assert captured["released"] is True
     assert captured["closed"] is True
+
+
+def test_urllib3_debug_logging_cannot_expose_unsubscribe_token(caplog):
+    token = "personalized-unsubscribe-token"
+    with caplog.at_level(logging.DEBUG):
+        logging.getLogger("urllib3.connectionpool").debug("POST /u?token=%s", token)
+    assert token not in caplog.text
 
 
 def test_calendar_create_event_forwards_conference_and_attendee_update_options(monkeypatch):
