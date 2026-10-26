@@ -4454,24 +4454,19 @@ async def gmail_batch_get_metadata(
     def _batch_get():
         if not message_ids:
             raise ValueError("message_ids cannot be empty")
-        _validate_fanout_items(message_ids, "message_ids")
+        _validate_fanout_items(
+            message_ids,
+            "message_ids",
+            items_per_provider_call=GMAIL_METADATA_BATCH_SIZE,
+        )
         service, cached = client.get_service("gmail", "v1")
         effective_headers = metadata_headers or list(DEFAULT_GMAIL_METADATA_HEADERS)
-        results = []
-        for message_id in message_ids:
-            if not message_id:
-                continue
-            request = (
-                service.users()
-                .messages()
-                .get(
-                    userId="me",
-                    id=message_id,
-                    format="metadata",
-                    metadataHeaders=effective_headers,
-                )
-            )
-            results.append(request.execute())
+        results = _gmail_get_metadata_batch(
+            service,
+            message_ids,
+            effective_headers,
+            max_messages=len(message_ids),
+        )
         return {"messages": results}, {"cached_service": cached}
 
     return await run_tool("gmail", "batch_get_metadata", _batch_get, allow_retry=True)
