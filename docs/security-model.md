@@ -111,7 +111,7 @@ authorization system.
 
 - Write and destructive tools remain constrained by Google OAuth scopes and
   the provider account's permissions.
-- All 49 manifest-destructive or billable tools and six additional
+- All 50 manifest-destructive or billable tools and six additional
   non-destructive write tools require explicit `confirm=true`; deployment
   configuration cannot weaken that gate.
 - Cleanup and batch workflows use planning or `dry_run=true` defaults where

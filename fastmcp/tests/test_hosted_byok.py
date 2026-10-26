@@ -60,6 +60,226 @@ def _mcp_client():
     return TestClient(app)
 
 
+class _UnsubscribeRequest:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def execute(self):
+        return self.payload
+
+
+class _UnsubscribeService:
+    def __init__(self, *, mailbox="leolara@madpanda3d.com", headers=None):
+        self.mailbox = mailbox
+        self.headers = headers or []
+
+    def users(self):
+        return self
+
+    def messages(self):
+        return self
+
+    def getProfile(self, **kwargs):
+        assert kwargs == {"userId": "me"}
+        return _UnsubscribeRequest({"emailAddress": self.mailbox})
+
+    def get(self, **kwargs):
+        assert kwargs["userId"] == "me"
+        assert kwargs["format"] == "metadata"
+        return _UnsubscribeRequest(
+            {
+                "id": kwargs["id"],
+                "threadId": "thread-1",
+                "payload": {"headers": self.headers},
+            }
+        )
+
+
+class _UnsubscribeClient:
+    def __init__(self, service):
+        self.service = service
+
+    def get_service(self, api_name, api_version):
+        assert (api_name, api_version) == ("gmail", "v1")
+        return self.service, False
+
+    def is_session_cached(self):
+        return False
+
+
+def _eligible_unsubscribe_headers(url="https://unsubscribe.bark.com/u?opaque=secret-token"):
+    return [
+        {"name": "From", "value": "Bark Team <team@bark.com>"},
+        {"name": "List-ID", "value": "Bark Updates <updates.bark.com>"},
+        {"name": "List-Unsubscribe", "value": f"<{url}>"},
+        {"name": "List-Unsubscribe-Post", "value": "List-Unsubscribe=One-Click"},
+    ]
+
+
+def test_gmail_one_click_unsubscribe_previews_without_exposing_or_posting(monkeypatch):
+    secret_url = "https://unsubscribe.bark.com/u?opaque=secret-token"
+    service = _UnsubscribeService(headers=_eligible_unsubscribe_headers(secret_url))
+    monkeypatch.setattr(gm, "client", _UnsubscribeClient(service))
+    monkeypatch.setattr(
+        gm.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(None, None, None, None, ("93.184.216.34", 443))],
+    )
+    monkeypatch.setattr(
+        gm,
+        "_gmail_unsubscribe_http_post",
+        lambda url: pytest.fail("preview must not make the unsubscribe request"),
+    )
+
+    raw = asyncio.run(
+        gm.gmail_preview_one_click_unsubscribe(
+            message_id="message-1",
+            expected_mailbox="leolara@madpanda3d.com",
+        )
+    )
+    payload = json.loads(raw)
+
+    assert payload["ok"] is True
+    assert payload["data"]["one_click_eligible"] is True
+    assert payload["data"]["executed"] is False
+    assert payload["data"]["sender_email"] == "team@bark.com"
+    assert payload["data"]["unsubscribe_url_redacted"] is True
+    assert secret_url not in raw
+    assert "secret-token" not in raw
+
+
+def test_gmail_one_click_unsubscribe_executes_exact_post_and_bounds_result(monkeypatch):
+    secret_url = "https://unsubscribe.bark.com/u?opaque=secret-token"
+    service = _UnsubscribeService(headers=_eligible_unsubscribe_headers(secret_url))
+    monkeypatch.setattr(gm, "client", _UnsubscribeClient(service))
+    monkeypatch.setattr(
+        gm.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(None, None, None, None, ("93.184.216.34", 443))],
+    )
+    captured = {}
+
+    class _Response:
+        status = 204
+
+        def release_conn(self):
+            captured["released"] = True
+
+    def _post(url):
+        captured["url"] = url
+        return _Response()
+
+    monkeypatch.setattr(gm, "_gmail_unsubscribe_http_post", _post)
+    raw = asyncio.run(
+        gm.gmail_one_click_unsubscribe(
+            message_id="message-1",
+            expected_mailbox="leolara@madpanda3d.com",
+            confirm=True,
+        )
+    )
+    payload = json.loads(raw)
+
+    assert captured == {"url": secret_url, "released": True}
+    assert payload["data"]["request_accepted"] is True
+    assert payload["data"]["provider_status"] == 204
+    assert payload["data"]["mail_stopped_guaranteed"] is False
+    assert secret_url not in raw
+    assert "secret-token" not in raw
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [{"name": "From", "value": "team@bark.com"}],
+        _eligible_unsubscribe_headers("http://unsubscribe.bark.com/u?token=secret"),
+        [
+            {"name": "From", "value": "team@bark.com"},
+            {"name": "List-Unsubscribe", "value": "<https://example.com/u>"},
+            {"name": "List-Unsubscribe-Post", "value": "unsupported=value"},
+        ],
+    ],
+)
+def test_gmail_one_click_unsubscribe_rejects_missing_or_malformed_headers(monkeypatch, headers):
+    monkeypatch.setattr(gm, "client", _UnsubscribeClient(_UnsubscribeService(headers=headers)))
+    raw = asyncio.run(
+        gm.gmail_preview_one_click_unsubscribe(
+            message_id="message-1",
+            expected_mailbox="leolara@madpanda3d.com",
+        )
+    )
+    payload = json.loads(raw)
+    assert payload["ok"] is False
+    assert payload["error"]["type"] == "invalid_params"
+    assert "secret" not in raw
+
+
+def test_gmail_one_click_unsubscribe_rejects_profile_mismatch_before_message_fetch(monkeypatch):
+    service = _UnsubscribeService(
+        mailbox="other@example.com", headers=_eligible_unsubscribe_headers()
+    )
+    monkeypatch.setattr(gm, "client", _UnsubscribeClient(service))
+    raw = asyncio.run(
+        gm.gmail_preview_one_click_unsubscribe(
+            message_id="message-1",
+            expected_mailbox="leolara@madpanda3d.com",
+        )
+    )
+    payload = json.loads(raw)
+    assert payload["ok"] is False
+    assert "does not match" in payload["error"]["message"]
+
+
+def test_gmail_one_click_unsubscribe_redacts_provider_failure(monkeypatch):
+    secret_url = "https://unsubscribe.bark.com/u?opaque=secret-token"
+    monkeypatch.setattr(
+        gm,
+        "client",
+        _UnsubscribeClient(_UnsubscribeService(headers=_eligible_unsubscribe_headers(secret_url))),
+    )
+    monkeypatch.setattr(
+        gm.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(None, None, None, None, ("93.184.216.34", 443))],
+    )
+    monkeypatch.setattr(
+        gm,
+        "_gmail_unsubscribe_http_post",
+        lambda url: (_ for _ in ()).throw(RuntimeError(f"failed at {url}")),
+    )
+    raw = asyncio.run(
+        gm.gmail_one_click_unsubscribe(
+            message_id="message-1",
+            expected_mailbox="leolara@madpanda3d.com",
+            confirm=True,
+        )
+    )
+    payload = json.loads(raw)
+    assert payload["ok"] is False
+    assert payload["error"]["type"] == "upstream_error"
+    assert secret_url not in raw
+    assert "secret-token" not in raw
+
+
+def test_gmail_unsubscribe_http_post_uses_rfc8058_body_and_disables_redirects(monkeypatch):
+    captured = {}
+
+    class _Pool:
+        def request(self, method, url, **kwargs):
+            captured.update({"method": method, "url": url, **kwargs})
+            return object()
+
+    monkeypatch.setattr(gm.urllib3, "PoolManager", lambda: _Pool())
+    url = "https://unsubscribe.example.com/u?opaque=never-output-this"
+    gm._gmail_unsubscribe_http_post(url)
+
+    assert captured["method"] == "POST"
+    assert captured["url"] == url
+    assert captured["body"] == b"List-Unsubscribe=One-Click"
+    assert captured["headers"]["Content-Type"] == "application/x-www-form-urlencoded"
+    assert captured["redirect"] is False
+    assert captured["retries"] is False
+
+
 def test_calendar_create_event_forwards_conference_and_attendee_update_options(monkeypatch):
     captured = {}
 
@@ -408,7 +628,7 @@ def test_tools_list_succeeds_with_valid_byok_headers():
     assert capabilities.status_code == 200
     capability_result = json.loads(capabilities.json()["result"]["content"][0]["text"])
     assert capability_result["serviceId"] == "google"
-    assert capability_result["counts"]["raw"] == 151
+    assert capability_result["counts"]["raw"] == 153
     payload = response.json()
     assert response.status_code == 200
     assert "result" in payload

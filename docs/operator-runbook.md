@@ -56,7 +56,7 @@ MCP_ALLOWED_HOSTS=localhost,127.0.0.1,<TRUSTED_PROXY_HOST>
 ```
 
 Keep the public defaults, including request-only BYOK, zero client-cache size,
-explicit confirmation for all 49 destructive or billable tools plus six
+explicit confirmation for all 50 destructive or billable tools plus six
 confirmed non-destructive writes, fixed GET/HEAD-only raw reads, browser-Origin
 rejection, bounded batch/provider fan-out, and request logging disabled.
 

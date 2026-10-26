@@ -1,8 +1,8 @@
 # Google MCP Endpoint Coverage
 
 - Reviewed: 2026-10-17
-- Catalog: `google-2026.10.17.1`
-- Native MCP tools: **151**
+- Catalog: `google-2026.10.26.1`
+- Native MCP tools: **153**
 
 This ledger describes the curated public wrappers in v1.0.0. It does not claim
 complete parity with every Google API endpoint. Google changes its APIs
@@ -31,7 +31,7 @@ hosts. It does not automatically retry.
 | Google Docs | 5 | partial | Create/get documents, insert/replace text, bounded batch update | Exhaustive parity with every batch request type |
 | Google Sheets | 11 | partial | Spreadsheet create/get/batch update; values get, append, update, clear, batch and data-filter operations | Developer metadata and sheet `copyTo` |
 | Google Slides | 6 | partial | Create/get presentations, replace text, batch update, page reads and thumbnails | Exhaustive parity with every batch request type |
-| Gmail | 38 | partial | Messages, threads, signature-safe sends/drafts, fingerprint-only send preflight, labels, attachments, history, bulk planning and bounded mutations | Watch/Pub/Sub, general settings mutation, CSE, forwarding, delegates, filters |
+| Gmail | 40 | partial | Messages, threads, signature-safe sends/drafts, fingerprint-only send preflight, safe one-click unsubscribe preview/execution, labels, attachments, history, bulk planning and bounded mutations | Watch/Pub/Sub, general settings mutation, CSE, forwarding, delegates, filters |
 | Google Calendar | 29 | partial | Calendars, calendar list, events, instances, import/move, free/busy, settings, colors, ACLs | Watch/channel lifecycle and complete recurrence/notification parity |
 | YouTube Data | 6 | partial, read-only | Search, channels, videos, playlists, playlist items, comment threads | Uploads, channel mutation, captions, subscriptions, moderation |
 | Google Analytics Data | 4 | partial, read-only | Metadata, standard reports, batch reports, realtime reports | Pivot reports, compatibility checks, audience exports |
@@ -44,7 +44,7 @@ hosts. It does not automatically retry.
 
 The remaining 11 native tools are nine local navigation/compatibility tools,
 one configuration diagnostic, and the hidden advanced-read tool. Together the
-surface totals 151.
+surface totals 153.
 
 ## Provider notes
 
@@ -72,7 +72,7 @@ surface totals 151.
   AdSense** are intentionally read-only in this release.
 - **Maps** requires the request-scoped `X-Google-Maps-Api-Key` header in
   addition to OAuth. A successful read can still consume quota or incur cost.
-- Google Ads is not part of the 151-tool contract. It needs a developer token,
+- Google Ads is not part of the 153-tool contract. It needs a developer token,
   account hierarchy, and a dedicated authorization and approval model.
 
 ## Official references
