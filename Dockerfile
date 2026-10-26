@@ -12,7 +12,7 @@ LABEL org.opencontainers.image.title="MADPANDA Google MCP" \
       com.madpanda.source-fingerprint="${SOURCE_FINGERPRINT}"
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends --only-upgrade libpcre2-8-0 perl-base \
+    && apt-get install -y --no-install-recommends --only-upgrade libpcre2-8-0 perl-base libssl3 openssl \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 10001 app \
