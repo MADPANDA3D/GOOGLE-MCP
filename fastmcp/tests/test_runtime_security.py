@@ -686,7 +686,7 @@ def test_confirmation_contract_covers_schema_and_transport_preflight():
         for descriptor in manifest["tools"]
         if "confirm" in descriptor["inputSchema"].get("properties", {})
     ]
-    assert len(confirmed) == 55
+    assert len(confirmed) == 56
     for descriptor in confirmed:
         assert descriptor["confirmation"]["required"] is True
         payload = {

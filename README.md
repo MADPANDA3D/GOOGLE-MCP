@@ -3,7 +3,7 @@
 <pre>
 +------------------------------------------------------------------------+
 |       .--.   .--.        MADPANDA3D // GOOGLE MCP                      |
-|      /    \_/    \       151 TOOLS // DUAL MODE // REQUEST BYOK        |
+|      /    \_/    \       153 TOOLS // DUAL MODE // REQUEST BYOK        |
 |     |   /\   /\   |      FASTMCP // PYTHON 3.12/3.13 // SELF-HOSTED    |
 |     |  (o)   (o)  |      FAIL-CLOSED // PROVIDER-FREE VERIFIED         |
 |      \     ^     /                                                     |
@@ -15,7 +15,7 @@ business intelligence, web presence, Maps, Merchant, and AdSense workflows.</p>
 <p>
 <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-ff2d55.svg"></a>
 <img alt="Python 3.12 and 3.13" src="https://img.shields.io/badge/python-3.12%20%7C%203.13-3776ab?logo=python&amp;logoColor=white">
-<img alt="MCP tools: 151" src="https://img.shields.io/badge/MCP%20tools-151-111827">
+<img alt="MCP tools: 153" src="https://img.shields.io/badge/MCP%20tools-153-111827">
 <img alt="Access modes: 2" src="https://img.shields.io/badge/access%20modes-2-22c55e">
 <img alt="Credentials: request-scoped BYOK" src="https://img.shields.io/badge/credentials-request--scoped%20BYOK-f59e0b">
 </p>
@@ -23,24 +23,24 @@ business intelligence, web presence, Maps, Merchant, and AdSense workflows.</p>
 
 ## The contract
 
-MADPANDA3D Google MCP exposes exactly **151 native MCP tools**:
+MADPANDA3D Google MCP exposes exactly **153 native MCP tools**:
 
 - **Five standard local navigation tools** explain configuration, discover the
   right capability, filter endpoint coverage, and return exact descriptors
   without contacting Google.
-- **146 remaining entries** cover 140 provider tools across 13 Google
+- **148 remaining entries** cover 142 provider tools across 13 Google
   families—including the hidden Gmail signature preflight—plus four
   compatibility navigation entries, one configuration diagnostic, and one
   hidden advanced-read tool.
-- ToolManifest catalog `google-2026.10.17.1` classifies the complete surface
-  as **144 agent-ready**, **five legacy**, and **two hidden**.
-- Manifest risk classes contain **84 read**, **18 write**, and **49
+- ToolManifest catalog `google-2026.10.26.1` classifies the complete surface
+  as **146 agent-ready**, **five legacy**, and **two hidden**.
+- Manifest risk classes contain **85 read**, **18 write**, and **50
   destructive or billable** tools. Every descriptor includes input/output
   schemas plus `readOnlyHint`, `destructiveHint`, `openWorldHint`, and
   `idempotentHint` where true. The last class contains 44 state-destructive
   tools plus five confirmed Maps reads that can consume billable quota.
 
-The server is stateless HTTP at `/mcp`, reports the same 151-tool contract at
+The server is stateless HTTP at `/mcp`, reports the same 153-tool contract at
 `/health`, and returns normalized `ok/data/error/meta` envelopes. It does
 not turn a deployment into a public or unauthenticated Google endpoint.
 
@@ -150,7 +150,7 @@ Expected safe health fields include:
 {
   "status": "healthy",
   "service": "google-mcp",
-  "tool_count": 151,
+  "tool_count": 153,
   "configuration": {
     "mode": "standalone",
     "provider_credentials_mode": "per_request_byok",
@@ -198,7 +198,7 @@ ToolManifest category function.
 | Google Docs | 5 | create, read, insert, replace, batch update |
 | Google Sheets | 11 | metadata, values, append, clear, batch update, data filters |
 | Google Slides | 6 | create, read, replace, batch update, pages, thumbnails |
-| Gmail | 38 | messages, threads, signature-safe sends/drafts, labels, attachments, history, cleanup planning |
+| Gmail | 40 | messages, threads, signature-safe sends/drafts, one-click unsubscribe preview/execution, labels, attachments, history, cleanup planning |
 | Google Calendar | 29 | calendars, events, free/busy, settings, instances, ACLs |
 | YouTube Data | 6 | search, channels, videos, playlists, playlist items, comment threads |
 | Google Analytics Data | 4 | metadata, standard, batch, and realtime reports |
@@ -210,7 +210,7 @@ ToolManifest category function.
 | Local navigation | 9 | five standard tools plus four compatibility entries |
 | Configuration diagnostic | 1 | `mcp_health_check` |
 | Advanced raw request | 1 | hidden `google_raw_request` |
-| **Total** | **151** | |
+| **Total** | **153** | |
 
 Use `find_tools` for a task-ranked shortlist, then `get_tool_usage` for the
 complete descriptor. Use
@@ -229,10 +229,11 @@ excluded, blocked by scope, or available only through the advanced raw tool.
 - Root deployment profiles disable server-side Google credential fallback.
 - Request-scoped OAuth values are not persisted by BYOK clients or returned in
   tool output.
-- All 49 manifest-destructive or billable tools and six additional
+- All 50 manifest-destructive or billable tools and six additional
   confirmation-bearing writes require `confirm=true`; there is no deployment
   toggle that weakens that gate.
 - Gmail cleanup and batch mutation tools default to `dry_run=true`.
+- Gmail one-click unsubscribe verifies a DKIM signature covering From and both RFC 8058 headers, rejects duplicate headers and messages over 2 MB, and pins the public DNS address used for the confirmed HTTPS POST. Senders with incomplete signatures are ineligible.
 - Gmail send and draft flows bind the selected configured send-as signature
   exactly once and fail before delivery when the signature is absent or its
   preflight fingerprint changes; hidden preflight output contains hashes, not

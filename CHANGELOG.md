@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-10-26
+
+- Added agent-ready Gmail one-click unsubscribe preview and confirmed execution tools.
+- Bound execution to an explicitly selected Gmail profile and message, verified DKIM coverage of both RFC 8058 headers, pinned the public HTTPS destination, disabled redirects/retries, and redacted personalized URLs and tokens from all results and errors.
+- Advanced the provider catalog to `google-2026.10.26.1` with 153 tools.
+
 All notable public releases are documented here.
 
 ## Unreleased

@@ -1,25 +1,25 @@
 # Complete tool catalog
 
-This catalog is generated from the **151 registered native tools** and the
+This catalog is generated from the **153 registered native tools** and the
 tier/category rules in `fastmcp/tool_manifest.py`. The runtime ToolManifest
 remains the machine-readable source of truth.
 
 ## Contract summary
 
-- Native tools: **151**
+- Native tools: **153**
 - Standard navigation tools: **5**
-- Other operational and compatibility tools: **146**
-- Tiers: **144 agent-ready**, **5 legacy**, **2 hidden**
-- Manifest risk: **84 read**, **18 write**, **49 destructive or billable**
+- Other operational and compatibility tools: **148**
+- Tiers: **146 agent-ready**, **5 legacy**, **2 hidden**
+- Manifest risk: **85 read**, **18 write**, **50 destructive or billable**
 
 Manifest risk classes are mutually exclusive for routing. The last class
-contains 44 state-destructive tools plus five Maps reads that set
+contains 45 state-destructive tools plus five Maps reads that set
 `destructiveHint=true`, require explicit confirmation, and disable automatic
 retry because they can consume billable quota.
 
 Six additional non-destructive write tools also expose a `confirm` parameter
 and publish required confirmation metadata. The full catalog therefore has
-**55 confirmation-required tools**.
+**56 confirmation-required tools**.
 
 A read classification does not mean output is public, free of personal data,
 or free of quota impact. State-destructive includes sends, overwrites, sharing
@@ -145,7 +145,7 @@ Presentation creation, reads, text replacement, batch updates, pages, and thumbn
 | `slides_get_presentation` | `agent_ready` | `read` |
 | `slides_replace_text` | `agent_ready` | `destructive/billable` |
 
-## Gmail (38)
+## Gmail (40)
 
 Messages, threads, drafts, labels, attachments, history, cleanup workflows, and signature-safe send preflight.
 
@@ -176,6 +176,8 @@ Messages, threads, drafts, labels, attachments, history, cleanup workflows, and 
 | `gmail_list_threads` | `agent_ready` | `read` |
 | `gmail_mailbox_overview` | `agent_ready` | `read` |
 | `gmail_modify_message_labels` | `agent_ready` | `destructive/billable` |
+| `gmail_one_click_unsubscribe` | `agent_ready` | `destructive/billable` |
+| `gmail_preview_one_click_unsubscribe` | `agent_ready` | `read` |
 | `gmail_modify_thread_labels` | `agent_ready` | `write` |
 | `gmail_search_messages` | `agent_ready` | `read` |
 | `gmail_send_draft` | `agent_ready` | `destructive/billable` |

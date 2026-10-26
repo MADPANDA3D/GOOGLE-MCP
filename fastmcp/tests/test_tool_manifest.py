@@ -24,17 +24,17 @@ def test_provider_manifest_is_complete_deterministic_and_lossless():
     assert manifest["schemaVersion"] == "1.0.0"
     assert manifest["serviceId"] == "google"
     assert manifest["catalogVersion"] == CATALOG_VERSION
-    assert CATALOG_VERSION == "google-2026.10.17.1"
+    assert CATALOG_VERSION == "google-2026.10.26.1"
     assert manifest["counts"] == {
-        "raw": 151,
-        "agentReady": 144,
+        "raw": 153,
+        "agentReady": 146,
         "legacy": 5,
         "hidden": 2,
     }
-    assert len(manifest["tools"]) == 151
+    assert len(manifest["tools"]) == 153
     assert manifest["descriptorHash"] == _canonical_hash(manifest["tools"])
     assert manifest["descriptorHash"] == (
-        "77764a71c76c356013bb186b12787729fc801f12a528e0ddaf25cbc6947f6af5"
+        "7e1feec8775b6b63d11c2febcacec598b5267b55852938080055a93da6ad0e42"
     )
     assert STANDARD_NAVIGATION_TOOLS <= {item["nativeToolName"] for item in manifest["tools"]}
 
@@ -57,10 +57,10 @@ def test_provider_manifest_is_complete_deterministic_and_lossless():
         for descriptor in manifest["tools"]
     ]
     assert _canonical_hash(identity_projection) == (
-        "156235e3f91fa345ae4e11308e20bddcd209822cc2cc1740e120dd6788cf52b6"
+        "4e16f5f58f09417bf8a446fb235ece5dcef8d1044bd97824db170d229afb5ac8"
     )
     assert _canonical_hash(compatibility_projection) == (
-        "87707366837470096901831729cb1948a55085115b565ed2d99f41329f7d6aa9"
+        "c041f5a59a95723da08bd18b665816f7ecb3d14f4668405eb523593259a6a509"
     )
 
     identities = set()
@@ -114,8 +114,8 @@ def test_provider_manifest_is_complete_deterministic_and_lossless():
             assert normalized not in identities
             identities.add(normalized)
 
-    assert risks == {"read": 84, "write": 18, "destructive": 49}
-    assert len(confirmed_tools) == 55
+    assert risks == {"read": 85, "write": 18, "destructive": 50}
+    assert len(confirmed_tools) == 56
     assert {
         descriptor["nativeToolName"]
         for descriptor in manifest["tools"]
@@ -129,6 +129,27 @@ def test_provider_manifest_is_complete_deterministic_and_lossless():
         "gmail_modify_thread_labels",
         "gmail_untrash_message",
     }
+
+
+def test_gmail_unsubscribe_descriptors_split_safe_preview_from_confirmed_execution():
+    by_name = {item["nativeToolName"]: item for item in gm._current_tool_manifest()["tools"]}
+    preview = by_name["gmail_preview_one_click_unsubscribe"]
+    execution = by_name["gmail_one_click_unsubscribe"]
+
+    assert preview["tier"] == "agent_ready"
+    assert preview["annotations"]["readOnlyHint"] is True
+    assert preview["annotations"]["destructiveHint"] is False
+    assert preview["confirmation"]["required"] is False
+    assert execution["tier"] == "agent_ready"
+    assert execution["annotations"]["destructiveHint"] is True
+    assert execution["confirmation"]["required"] is True
+    assert execution["confirmation"]["exactPhrase"] == (
+        "CONFIRM GOOGLE GMAIL ONE CLICK UNSUBSCRIBE"
+    )
+    for descriptor in (preview, execution):
+        properties = descriptor["inputSchema"]["properties"]
+        assert properties["message_id"]["description"]
+        assert properties["expected_mailbox"]["description"]
 
 
 def test_gmail_update_draft_is_destructive_and_fails_closed_without_confirmation():
@@ -208,11 +229,11 @@ def test_manifest_preserves_legacy_and_advanced_contract_tiers():
 
 def test_list_capabilities_returns_counts_or_complete_descriptors():
     counts_only = json.loads(asyncio.run(gm.list_capabilities(False)))
-    assert counts_only["counts"]["raw"] == 151
+    assert counts_only["counts"]["raw"] == 153
     assert counts_only["tools"] == []
 
     complete = json.loads(asyncio.run(gm.list_capabilities(True)))
-    assert len(complete["tools"]) == 151
+    assert len(complete["tools"]) == 153
     assert complete["descriptorHash"] == _canonical_hash(complete["tools"])
 
 
@@ -261,11 +282,11 @@ def test_health_reports_catalog_build_and_contract_counts():
     assert response.status_code == 200
     assert payload["ok"] is True
     assert payload["status"] == "healthy"
-    assert payload["tool_count"] == 151
-    assert payload["raw_tool_count"] == 151
-    assert payload["exposed_tool_count"] == 151
-    assert payload["agent_ready_tool_count"] == 144
-    assert payload["documented_tool_count"] == 151
+    assert payload["tool_count"] == 153
+    assert payload["raw_tool_count"] == 153
+    assert payload["exposed_tool_count"] == 153
+    assert payload["agent_ready_tool_count"] == 146
+    assert payload["documented_tool_count"] == 153
     assert payload["catalog_version"] == CATALOG_VERSION
     assert len(payload["descriptor_hash"]) == 64
     assert payload["configuration"]["ready"] is True

@@ -66,6 +66,17 @@ Google access tokens obtained with the tuple live in memory and inherit the
 provider library's token lifetime. Operators must assume process memory is
 sensitive and prevent core dumps, debug snapshots, and unsanitized tracing.
 
+Gmail one-click unsubscribe reads a bounded raw message and independently
+verifies a DKIM signature covering From and both RFC 8058 list headers. Unsigned
+List-ID values are omitted in favor of the signed From domain. The preview
+checks destination DNS but performs no unsubscribe POST. Confirmed execution resolves the HTTPS host,
+rejects non-public addresses, and pins the checked address for TLS and the
+single POST. Redirects, retries, cookies, and authorization headers are disabled.
+urllib3 connection-pool DEBUG logging is suppressed because it includes request
+paths and query tokens.
+Messages without valid signed coverage, including senders that omit
+`List-Unsubscribe-Post` from their DKIM signature, are ineligible.
+
 Maps tools additionally require `X-Google-Maps-Api-Key`. They require explicit
 confirmation, do not automatically retry, and can consume billable quota even
 though they perform reads.
@@ -111,7 +122,7 @@ authorization system.
 
 - Write and destructive tools remain constrained by Google OAuth scopes and
   the provider account's permissions.
-- All 49 manifest-destructive or billable tools and six additional
+- All 50 manifest-destructive or billable tools and six additional
   non-destructive write tools require explicit `confirm=true`; deployment
   configuration cannot weaken that gate.
 - Cleanup and batch workflows use planning or `dry_run=true` defaults where

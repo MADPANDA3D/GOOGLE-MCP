@@ -6,8 +6,8 @@
 |---|---|
 | Schema version | `1.0.0` |
 | Service ID | `google` |
-| Catalog version | `google-2026.10.17.1` |
-| Native tools | 151 |
+| Catalog version | `google-2026.10.26.1` |
+| Native tools | 153 |
 | Descriptor hash | Runtime-generated from the ordered descriptors |
 
 `list_capabilities(include_descriptors=true)` is the provider-owned source of
@@ -18,10 +18,10 @@ catalog plus a deterministic SHA-256 descriptor hash.
 
 | Tier | Count | Discovery behavior |
 |---|---:|---|
-| `agent_ready` | 144 | Returned by default task discovery |
+| `agent_ready` | 146 | Returned by default task discovery |
 | `legacy` | 5 | Returned only when advanced discovery includes legacy tools |
 | `hidden` | 2 | Excluded from task discovery |
-| **Total** | **151** | |
+| **Total** | **153** | |
 
 The five legacy entries are:
 
@@ -64,20 +64,20 @@ confirmation and routing:
 
 | Manifest risk | Count | Meaning |
 |---|---:|---|
-| Read | 84 | No intended provider mutation; may still access sensitive data or consume quota |
+| Read | 85 | No intended provider mutation; may still access sensitive data or consume quota |
 | Write | 18 | Creates or updates provider state without a destructive/billable routing classification |
-| Destructive/billable | 49 | 44 state-destructive sends, overwrites, moves, shares, removes, deletes, or batch mutations plus five confirmed Maps reads |
-| **Total** | **151** | |
+| Destructive/billable | 50 | 45 state-destructive sends, overwrites, moves, shares, removes, deletes, external unsubscribe requests, or batch mutations plus five confirmed Maps reads |
+| **Total** | **153** | |
 
 Annotations add behavioral detail. All five Maps tools set both
 `readOnlyHint=true` and `destructiveHint=true`; the manifest places them in the
 destructive/billable routing class, requires explicit confirmation, and
-disables automatic retry. Across the catalog, 89 tools set
-`readOnlyHint=true`, while 49 set `destructiveHint=true`.
+disables automatic retry. Across the catalog, 90 tools set
+`readOnlyHint=true`, while 50 set `destructiveHint=true`.
 
-Confirmation is schema-driven as well as annotation-driven. All 49
+Confirmation is schema-driven as well as annotation-driven. All 50
 destructive/billable tools require confirmation, and six non-destructive write
-tools with an explicit `confirm` parameter do too, for **55 confirmed tools**
+tools with an explicit `confirm` parameter do too, for **56 confirmed tools**
 in total.
 
 Every descriptor contains:

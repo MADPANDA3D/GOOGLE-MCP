@@ -12,7 +12,7 @@ LABEL org.opencontainers.image.title="MADPANDA Google MCP" \
       com.madpanda.source-fingerprint="${SOURCE_FINGERPRINT}"
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends --only-upgrade libpcre2-8-0 perl-base \
+    && apt-get install -y --no-install-recommends --only-upgrade libpcre2-8-0 perl-base libssl3 openssl \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 10001 app \
@@ -41,7 +41,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     MCP_BUILD_SHA="${BUILD_SHA}" \
     MCP_SERVER_VERSION="${BUILD_SHA}" \
     MCP_SOURCE_FINGERPRINT="${SOURCE_FINGERPRINT}" \
-    MCP_EXPECTED_TOOL_COUNT=151 \
+    MCP_EXPECTED_TOOL_COUNT=153 \
     MCP_PROVIDER_RESPONSE_MAX_BYTES=4194304 \
     MCP_MAX_BATCH_ITEMS=1000 \
     MCP_MAX_PROVIDER_CALLS_PER_TOOL=128 \
