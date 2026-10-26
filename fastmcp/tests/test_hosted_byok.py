@@ -1335,6 +1335,39 @@ def test_gmail_metadata_fetch_uses_google_batch_requests():
     assert results[0]["headers"]["from"] == "News <news@example.com>"
 
 
+def test_gmail_batch_get_metadata_uses_bounded_google_batches(monkeypatch):
+    class _FakeClient:
+        def get_service(self, api_name, api_version):
+            assert (api_name, api_version) == ("gmail", "v1")
+            return object(), False
+
+        def is_session_cached(self):
+            return False
+
+    captured = {}
+
+    def _fake_batch(service, message_ids, metadata_headers, *, max_messages):
+        captured.update(
+            service=service,
+            message_ids=message_ids,
+            metadata_headers=metadata_headers,
+            max_messages=max_messages,
+        )
+        return [{"id": message_id} for message_id in message_ids]
+
+    monkeypatch.setattr(gm, "client", _FakeClient())
+    monkeypatch.setattr(gm, "_gmail_get_metadata_batch", _fake_batch)
+
+    message_ids = [f"m{index}" for index in range(27)]
+    payload = json.loads(asyncio.run(gm.gmail_batch_get_metadata(message_ids)))
+
+    assert payload["ok"] is True
+    assert [item["id"] for item in payload["data"]["messages"]] == message_ids
+    assert captured["message_ids"] == message_ids
+    assert captured["metadata_headers"] == list(gm.DEFAULT_GMAIL_METADATA_HEADERS)
+    assert captured["max_messages"] == 27
+
+
 def test_workspace_create_tools_request_compact_fields(monkeypatch):
     captured = {}
 
