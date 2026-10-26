@@ -1335,6 +1335,65 @@ def test_gmail_metadata_fetch_uses_google_batch_requests():
     assert results[0]["headers"]["from"] == "News <news@example.com>"
 
 
+def test_gmail_batch_get_metadata_chunks_reported_27_id_case(monkeypatch):
+    batch_sizes = []
+
+    class _FakeRequest:
+        def __init__(self, message_id):
+            self.message_id = message_id
+
+    class _FakeBatch:
+        def __init__(self, callback):
+            self.callback = callback
+            self.requests = []
+
+        def add(self, request, request_id):
+            self.requests.append((request_id, request))
+
+        def execute(self):
+            batch_sizes.append(len(self.requests))
+            for request_id, request in self.requests:
+                self.callback(
+                    request_id,
+                    {
+                        "id": request.message_id,
+                        "threadId": f"t-{request.message_id}",
+                        "payload": {"headers": [{"name": "Subject", "value": request.message_id}]},
+                    },
+                    None,
+                )
+
+    class _FakeMessages:
+        def get(self, **kwargs):
+            assert kwargs["format"] == "metadata"
+            return _FakeRequest(kwargs["id"])
+
+    class _FakeService:
+        def users(self):
+            return self
+
+        def messages(self):
+            return _FakeMessages()
+
+        def new_batch_http_request(self, callback):
+            return _FakeBatch(callback)
+
+    class _FakeClient:
+        def get_service(self, api_name, api_version):
+            assert (api_name, api_version) == ("gmail", "v1")
+            return _FakeService(), False
+
+    monkeypatch.setattr(gm, "client", _FakeClient())
+    message_ids = [f"m{index}" for index in range(27)]
+
+    payload = json.loads(asyncio.run(gm.gmail_batch_get_metadata(message_ids)))
+
+    assert payload["ok"] is True
+    assert batch_sizes == [5, 5, 5, 5, 5, 2]
+    assert [message["id"] for message in payload["data"]["messages"]] == message_ids
+    assert payload["data"]["messages"][0]["headers"]["subject"] == "m0"
+
+
 def test_workspace_create_tools_request_compact_fields(monkeypatch):
     captured = {}
 
