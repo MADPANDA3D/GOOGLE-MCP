@@ -33,14 +33,34 @@ def test_provider_manifest_is_complete_deterministic_and_lossless():
     }
     assert len(manifest["tools"]) == 153
     assert manifest["descriptorHash"] == _canonical_hash(manifest["tools"])
+    assert manifest["descriptorHash"] == (
+        "7e1feec8775b6b63d11c2febcacec598b5267b55852938080055a93da6ad0e42"
+    )
     assert STANDARD_NAVIGATION_TOOLS <= {item["nativeToolName"] for item in manifest["tools"]}
 
     identity_projection = [
         {key: descriptor[key] for key in ("nativeToolName", "canonicalName", "aliases")}
         for descriptor in manifest["tools"]
     ]
+    compatibility_projection = [
+        {
+            key: descriptor[key]
+            for key in (
+                "nativeToolName",
+                "aliases",
+                "inputSchema",
+                "outputSchema",
+                "annotations",
+                "confirmation",
+            )
+        }
+        for descriptor in manifest["tools"]
+    ]
     assert _canonical_hash(identity_projection) == (
         "4e16f5f58f09417bf8a446fb235ece5dcef8d1044bd97824db170d229afb5ac8"
+    )
+    assert _canonical_hash(compatibility_projection) == (
+        "c041f5a59a95723da08bd18b665816f7ecb3d14f4668405eb523593259a6a509"
     )
 
     identities = set()
@@ -112,9 +132,7 @@ def test_provider_manifest_is_complete_deterministic_and_lossless():
 
 
 def test_gmail_unsubscribe_descriptors_split_safe_preview_from_confirmed_execution():
-    by_name = {
-        item["nativeToolName"]: item for item in gm._current_tool_manifest()["tools"]
-    }
+    by_name = {item["nativeToolName"]: item for item in gm._current_tool_manifest()["tools"]}
     preview = by_name["gmail_preview_one_click_unsubscribe"]
     execution = by_name["gmail_one_click_unsubscribe"]
 

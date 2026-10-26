@@ -66,6 +66,14 @@ Google access tokens obtained with the tuple live in memory and inherit the
 provider library's token lifetime. Operators must assume process memory is
 sensitive and prevent core dumps, debug snapshots, and unsanitized tracing.
 
+Gmail one-click unsubscribe reads a bounded raw message and independently
+verifies a DKIM signature covering both RFC 8058 list headers. The preview
+performs no unsubscribe POST. Confirmed execution resolves the HTTPS host,
+rejects non-public addresses, and pins the checked address for TLS and the
+single POST. Redirects, retries, cookies, and authorization headers are disabled.
+Messages without valid signed coverage, including senders that omit
+`List-Unsubscribe-Post` from their DKIM signature, are ineligible.
+
 Maps tools additionally require `X-Google-Maps-Api-Key`. They require explicit
 confirmation, do not automatically retry, and can consume billable quota even
 though they perform reads.

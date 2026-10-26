@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import binascii
 import contextvars
 import copy
 import hashlib
@@ -28,8 +29,9 @@ from html import escape as html_escape
 from html.parser import HTMLParser
 from typing import Any, Callable
 
-import uvicorn
+import dkim
 import urllib3
+import uvicorn
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import AuthorizedSession, Request
 from google.oauth2.credentials import Credentials
@@ -86,6 +88,7 @@ GMAIL_SIGNATURE_MARKER = "data-madpanda-gmail-signature"
 DEFAULT_GMAIL_BODY_MAX_CHARS = 8000
 MAX_GMAIL_BODY_MAX_CHARS = 100000
 MAX_GMAIL_ATTACHMENT_SUMMARIES = 50
+MAX_GMAIL_UNSUBSCRIBE_RAW_BYTES = 2_000_000
 
 MCP_HTTP_PORT = int(os.getenv("MCP_HTTP_PORT", "8086"))
 MCP_BIND_ADDRESS = os.getenv("MCP_BIND_ADDRESS", "0.0.0.0")
@@ -1568,7 +1571,7 @@ def _gmail_sender_key(headers: dict[str, str]) -> dict[str, str]:
 
 def _gmail_one_click_unsubscribe_url(
     headers: dict[str, str], *, resolve_host: bool
-) -> str:
+) -> tuple[str, str | None]:
     post_header = headers.get("list-unsubscribe-post", "").strip()
     if post_header.lower() != "list-unsubscribe=one-click":
         raise ValueError(
@@ -1576,13 +1579,17 @@ def _gmail_one_click_unsubscribe_url(
             "List-Unsubscribe-Post is missing or unsupported."
         )
     raw_header = headers.get("list-unsubscribe", "").strip()
-    candidates = re.findall(r"<([^<>]+)>", raw_header)
-    if len(candidates) != 1 or raw_header != f"<{candidates[0]}>".strip():
+    if not re.fullmatch(r"<[^<>]+>(?:\s*,\s*<[^<>]+>)*", raw_header):
         raise ValueError(
             "Message is not eligible for HTTPS one-click unsubscribe: "
-            "List-Unsubscribe must contain exactly one enclosed URL."
+            "List-Unsubscribe has invalid URI syntax."
         )
-    url = candidates[0].strip()
+    candidates = [item.strip() for item in re.findall(r"<([^<>]+)>", raw_header)]
+    schemes = [urllib.parse.urlsplit(item).scheme.lower() for item in candidates]
+    urls = [item for item, scheme in zip(candidates, schemes) if scheme == "https"]
+    if len(urls) != 1 or any(not scheme or scheme == "http" for scheme in schemes):
+        raise ValueError("List-Unsubscribe requires exactly one HTTPS URI and no HTTP URI.")
+    url = str(urls[0])
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme.lower() != "https" or not parsed.hostname:
         raise ValueError("One-click unsubscribe requires a valid HTTPS URL.")
@@ -1597,35 +1604,90 @@ def _gmail_one_click_unsubscribe_url(
     hostname = parsed.hostname.rstrip(".").lower()
     if hostname == "localhost" or hostname.endswith(".localhost"):
         raise ValueError("One-click unsubscribe URL host is not public.")
+    address = None
     if resolve_host:
         try:
             addresses = {
-                item[4][0]
+                str(item[4][0])
                 for item in socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
             }
         except OSError as exc:
-            raise ValueError("One-click unsubscribe URL host could not be resolved safely.") from exc
+            raise ValueError(
+                "One-click unsubscribe URL host could not be resolved safely."
+            ) from exc
         if not addresses or any(
             not ipaddress.ip_address(address).is_global for address in addresses
         ):
             raise ValueError("One-click unsubscribe URL host is not public.")
-    return url
+        address = sorted(addresses)[0]
+    return url, address
 
 
-def _gmail_unsubscribe_http_post(url: str) -> Any:
-    return urllib3.PoolManager().request(
-        "POST",
-        url,
-        body=b"List-Unsubscribe=One-Click",
-        headers={
-            "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": "MADPANDA3D-Google-MCP/one-click-unsubscribe",
-        },
-        redirect=False,
-        retries=False,
-        timeout=urllib3.Timeout(connect=5.0, read=10.0),
-        preload_content=False,
+def _gmail_unsubscribe_http_post(url: str, address: str) -> int:
+    parsed = urllib.parse.urlsplit(url)
+    hostname = (parsed.hostname or "").rstrip(".").lower()
+    host_header = f"[{hostname}]" if ":" in hostname else hostname.encode("idna").decode("ascii")
+    target = parsed.path or "/"
+    if parsed.query:
+        target += f"?{parsed.query}"
+    pool = urllib3.HTTPSConnectionPool(
+        address,
+        server_hostname=hostname,
+        assert_hostname=hostname,
+        cert_reqs="CERT_REQUIRED",
     )
+    try:
+        response = pool.request(
+            "POST",
+            target,
+            body=b"List-Unsubscribe=One-Click",
+            headers={
+                "Host": host_header,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": "MADPANDA3D-Google-MCP/one-click-unsubscribe",
+            },
+            assert_same_host=False,
+            redirect=False,
+            retries=False,
+            timeout=urllib3.Timeout(connect=5.0, read=10.0),
+            preload_content=False,
+        )
+        try:
+            return int(response.status)
+        finally:
+            response.release_conn()
+    finally:
+        pool.close()
+
+
+def _gmail_verified_one_click_headers(raw_message: bytes) -> dict[str, str]:
+    try:
+        verifier = dkim.DKIM(raw_message, timeout=5)
+    except Exception as exc:
+        raise ValueError("Message cannot be parsed for DKIM verification.") from exc
+    headers = [(name.lower(), value) for name, value in verifier.headers]
+    names = [name for name, _ in headers]
+    for name in (b"from", b"list-unsubscribe", b"list-unsubscribe-post"):
+        if names.count(name) != 1:
+            raise ValueError("Message has missing or duplicate one-click unsubscribe headers.")
+    signatures = [value for name, value in headers if name == b"dkim-signature"]
+    if not 1 <= len(signatures) <= 5:
+        raise ValueError("Message lacks a bounded DKIM signature set for one-click unsubscribe.")
+    required = {b"list-unsubscribe", b"list-unsubscribe-post"}
+    for index, signature in enumerate(signatures):
+        signed = re.search(rb"(?:^|;)\s*h\s*=\s*([^;]+)", signature, re.IGNORECASE)
+        if not signed or not required <= {part.strip().lower() for part in signed[1].split(b":")}:
+            continue
+        try:
+            if verifier.verify(idx=index):
+                return {
+                    name.decode("ascii", "ignore"): value.decode("utf-8", "replace").strip()
+                    for name, value in headers
+                }
+        except Exception:
+            # DNS and malformed-signature failures must fail closed without exposing header data.
+            continue
+    raise ValueError("Message lacks a valid DKIM signature covering both one-click headers.")
 
 
 def _clamp_int(value: int, *, minimum: int, maximum: int) -> int:
@@ -2256,13 +2318,14 @@ TOOL_DESCRIPTIONS = {
     ),
     "gmail_preview_one_click_unsubscribe": (
         "Use this read-only Gmail tool to preview RFC 8058 HTTPS one-click unsubscribe "
-        "eligibility for one selected mailbox message. It identifies the mailbox, sender, "
-        "list, and message without returning the personalized unsubscribe URL or token."
+        "eligibility for one selected mailbox message. It verifies DKIM coverage of both "
+        "unsubscribe headers and identifies the mailbox, sender, list, and message without "
+        "returning the personalized unsubscribe URL or token."
     ),
     "gmail_one_click_unsubscribe": (
         "Use this Gmail destructive tool to execute RFC 8058 HTTPS one-click "
-        "unsubscribe for one selected mailbox message. It reads only Gmail-authenticated "
-        "List-Unsubscribe headers, never accepts a caller URL, never returns the personalized "
+        "unsubscribe for one selected mailbox message. It verifies DKIM coverage of both "
+        "headers, pins the public HTTPS destination, never accepts a caller URL or returns the personalized "
         "URL or token, and requires confirm=true for execution. A successful provider response "
         "means the request was accepted, not that future mail is guaranteed to stop."
     ),
@@ -4554,19 +4617,29 @@ def _gmail_one_click_unsubscribe_operation(
         .get(
             userId="me",
             id=message_id,
-            format="metadata",
-            metadataHeaders=[
-                "From",
-                "List-ID",
-                "List-Unsubscribe",
-                "List-Unsubscribe-Post",
-            ],
-            fields="id,threadId,payload/headers",
+            format="raw",
+            fields="id,threadId,sizeEstimate,raw",
         )
         .execute()
     )
-    headers = _header_map(data.get("payload", {}).get("headers", []) or [])
-    unsubscribe_url = _gmail_one_click_unsubscribe_url(headers, resolve_host=execute)
+    encoded = data.get("raw", "")
+    if (
+        not isinstance(encoded, str)
+        or len(encoded) > (4 * MAX_GMAIL_UNSUBSCRIBE_RAW_BYTES // 3) + 16
+        or int(data.get("sizeEstimate") or 0) > MAX_GMAIL_UNSUBSCRIBE_RAW_BYTES
+    ):
+        raise ValueError("Message is too large for safe one-click unsubscribe verification.")
+    try:
+        raw_message = base64.b64decode(
+            encoded.replace("-", "+").replace("_", "/") + "=" * (-len(encoded) % 4),
+            validate=True,
+        )
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError("Gmail returned invalid raw message data.") from exc
+    if not raw_message or len(raw_message) > MAX_GMAIL_UNSUBSCRIBE_RAW_BYTES:
+        raise ValueError("Message is too large for safe one-click unsubscribe verification.")
+    headers = _gmail_verified_one_click_headers(raw_message)
+    unsubscribe_url, address = _gmail_one_click_unsubscribe_url(headers, resolve_host=execute)
     sender = _gmail_sender_key(headers)
     if not sender["sender_email"] or sender["sender_email"].count("@") != 1:
         raise ValueError("Message From header does not identify a valid sender.")
@@ -4587,10 +4660,10 @@ def _gmail_one_click_unsubscribe_operation(
             "confirmation_required": True,
             "message": "Preview only. Explicit confirmation is required to send the unsubscribe request.",
         }, {"cached_service": cached}
+    if address is None:
+        raise ValueError("One-click unsubscribe destination was not verified.")
     try:
-        response = _gmail_unsubscribe_http_post(unsubscribe_url)
-        status = int(response.status)
-        response.release_conn()
+        status = _gmail_unsubscribe_http_post(unsubscribe_url, address)
     except Exception as exc:
         raise GoogleProviderError(
             "One-click unsubscribe provider request failed without exposing its URL.",
@@ -4624,9 +4697,7 @@ async def gmail_preview_one_click_unsubscribe(
     return await run_tool(
         "gmail",
         "preview_one_click_unsubscribe",
-        lambda: _gmail_one_click_unsubscribe_operation(
-            message_id, expected_mailbox, execute=False
-        ),
+        lambda: _gmail_one_click_unsubscribe_operation(message_id, expected_mailbox, execute=False),
         allow_retry=False,
     )
 

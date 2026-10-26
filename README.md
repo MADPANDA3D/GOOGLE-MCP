@@ -233,6 +233,7 @@ excluded, blocked by scope, or available only through the advanced raw tool.
   confirmation-bearing writes require `confirm=true`; there is no deployment
   toggle that weakens that gate.
 - Gmail cleanup and batch mutation tools default to `dry_run=true`.
+- Gmail one-click unsubscribe verifies a DKIM signature covering both RFC 8058 headers, rejects duplicate headers and messages over 2 MB, and pins the public DNS address used for the confirmed HTTPS POST. Senders with incomplete signatures are ineligible.
 - Gmail send and draft flows bind the selected configured send-as signature
   exactly once and fail before delivery when the signature is absent or its
   preflight fingerprint changes; hidden preflight output contains hashes, not

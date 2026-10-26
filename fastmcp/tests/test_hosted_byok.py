@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import sys
 from datetime import datetime, timezone
@@ -6,6 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from starlette.testclient import TestClient
 
 TEST_PORTAL_GRANT_TOKEN = "test-portal-grant-0000000000000000"
@@ -85,12 +88,17 @@ class _UnsubscribeService:
 
     def get(self, **kwargs):
         assert kwargs["userId"] == "me"
-        assert kwargs["format"] == "metadata"
+        assert kwargs["format"] == "raw"
+        raw = (
+            "\r\n".join(f"{entry['name']}: {entry['value']}" for entry in self.headers)
+            + "\r\n\r\nbody"
+        ).encode("utf-8")
         return _UnsubscribeRequest(
             {
                 "id": kwargs["id"],
                 "threadId": "thread-1",
-                "payload": {"headers": self.headers},
+                "sizeEstimate": len(raw),
+                "raw": base64.urlsafe_b64encode(raw).decode("ascii"),
             }
         )
 
@@ -109,6 +117,10 @@ class _UnsubscribeClient:
 
 def _eligible_unsubscribe_headers(url="https://unsubscribe.bark.com/u?opaque=secret-token"):
     return [
+        {
+            "name": "DKIM-Signature",
+            "value": "v=1; d=bark.com; s=mail; h=from:list-unsubscribe:list-unsubscribe-post; b=test",
+        },
         {"name": "From", "value": "Bark Team <team@bark.com>"},
         {"name": "List-ID", "value": "Bark Updates <updates.bark.com>"},
         {"name": "List-Unsubscribe", "value": f"<{url}>"},
@@ -116,7 +128,24 @@ def _eligible_unsubscribe_headers(url="https://unsubscribe.bark.com/u?opaque=sec
     ]
 
 
+def _mock_valid_dkim(monkeypatch):
+    real_dkim = gm.dkim.DKIM
+
+    class _Verifier(real_dkim):
+        def __init__(self, message, timeout):
+            assert message
+            assert timeout == 5
+            super().__init__(message, timeout=timeout)
+
+        def verify(self, idx):
+            assert idx == 0
+            return True
+
+    monkeypatch.setattr(gm.dkim, "DKIM", _Verifier)
+
+
 def test_gmail_one_click_unsubscribe_previews_without_exposing_or_posting(monkeypatch):
+    _mock_valid_dkim(monkeypatch)
     secret_url = "https://unsubscribe.bark.com/u?opaque=secret-token"
     service = _UnsubscribeService(headers=_eligible_unsubscribe_headers(secret_url))
     monkeypatch.setattr(gm, "client", _UnsubscribeClient(service))
@@ -128,7 +157,7 @@ def test_gmail_one_click_unsubscribe_previews_without_exposing_or_posting(monkey
     monkeypatch.setattr(
         gm,
         "_gmail_unsubscribe_http_post",
-        lambda url: pytest.fail("preview must not make the unsubscribe request"),
+        lambda url, address: pytest.fail("preview must not make the unsubscribe request"),
     )
 
     raw = asyncio.run(
@@ -149,6 +178,7 @@ def test_gmail_one_click_unsubscribe_previews_without_exposing_or_posting(monkey
 
 
 def test_gmail_one_click_unsubscribe_executes_exact_post_and_bounds_result(monkeypatch):
+    _mock_valid_dkim(monkeypatch)
     secret_url = "https://unsubscribe.bark.com/u?opaque=secret-token"
     service = _UnsubscribeService(headers=_eligible_unsubscribe_headers(secret_url))
     monkeypatch.setattr(gm, "client", _UnsubscribeClient(service))
@@ -159,15 +189,10 @@ def test_gmail_one_click_unsubscribe_executes_exact_post_and_bounds_result(monke
     )
     captured = {}
 
-    class _Response:
-        status = 204
-
-        def release_conn(self):
-            captured["released"] = True
-
-    def _post(url):
+    def _post(url, address):
         captured["url"] = url
-        return _Response()
+        captured["address"] = address
+        return 204
 
     monkeypatch.setattr(gm, "_gmail_unsubscribe_http_post", _post)
     raw = asyncio.run(
@@ -179,7 +204,7 @@ def test_gmail_one_click_unsubscribe_executes_exact_post_and_bounds_result(monke
     )
     payload = json.loads(raw)
 
-    assert captured == {"url": secret_url, "released": True}
+    assert captured == {"url": secret_url, "address": "93.184.216.34"}
     assert payload["data"]["request_accepted"] is True
     assert payload["data"]["provider_status"] == 204
     assert payload["data"]["mail_stopped_guaranteed"] is False
@@ -200,6 +225,7 @@ def test_gmail_one_click_unsubscribe_executes_exact_post_and_bounds_result(monke
     ],
 )
 def test_gmail_one_click_unsubscribe_rejects_missing_or_malformed_headers(monkeypatch, headers):
+    _mock_valid_dkim(monkeypatch)
     monkeypatch.setattr(gm, "client", _UnsubscribeClient(_UnsubscribeService(headers=headers)))
     raw = asyncio.run(
         gm.gmail_preview_one_click_unsubscribe(
@@ -229,7 +255,120 @@ def test_gmail_one_click_unsubscribe_rejects_profile_mismatch_before_message_fet
     assert "does not match" in payload["error"]["message"]
 
 
+def test_gmail_one_click_unsubscribe_requires_confirmation_before_provider_access(monkeypatch):
+    monkeypatch.setattr(
+        gm,
+        "client",
+        SimpleNamespace(
+            get_service=lambda *args: pytest.fail("provider access before confirmation"),
+            is_session_cached=lambda: False,
+        ),
+    )
+    payload = json.loads(
+        asyncio.run(
+            gm.gmail_one_click_unsubscribe(
+                message_id="message-1",
+                expected_mailbox="leolara@madpanda3d.com",
+            )
+        )
+    )
+    assert payload["ok"] is False
+    assert "confirm=true" in payload["error"]["message"]
+
+
+def test_gmail_one_click_unsubscribe_rejects_duplicate_and_unsigned_headers(monkeypatch):
+    _mock_valid_dkim(monkeypatch)
+    headers = _eligible_unsubscribe_headers()
+    raw = (
+        "\r\n".join(f"{item['name']}: {item['value']}" for item in headers) + "\r\n\r\nbody"
+    ).encode()
+    assert gm._gmail_verified_one_click_headers(raw)["from"] == "Bark Team <team@bark.com>"
+
+    duplicate = raw.replace(
+        b"List-Unsubscribe-Post:",
+        b"List-Unsubscribe: <https://other.example/u>\r\nList-Unsubscribe-Post:",
+    )
+    with pytest.raises(ValueError, match="duplicate"):
+        gm._gmail_verified_one_click_headers(duplicate)
+
+    unsigned = raw.replace(b"list-unsubscribe:list-unsubscribe-post", b"list-unsubscribe:list-id")
+    with pytest.raises(ValueError, match="covering both"):
+        gm._gmail_verified_one_click_headers(unsigned)
+
+
+def test_gmail_one_click_unsubscribe_requires_cryptographically_valid_dkim(monkeypatch):
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    private_pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    public_der = key.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    dns_record = b"v=DKIM1; k=rsa; p=" + base64.b64encode(public_der)
+    message = (
+        b"From: Sender <sender@example.com>\r\n"
+        b"List-Unsubscribe: <https://unsubscribe.example.com/u>\r\n"
+        b"List-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n"
+        b"\r\nbody\r\n"
+    )
+    signature = gm.dkim.sign(
+        message,
+        b"mail",
+        b"example.com",
+        private_pem,
+        include_headers=[b"from", b"list-unsubscribe", b"list-unsubscribe-post"],
+    )
+    real_dkim = gm.dkim.DKIM
+
+    class _OfflineDKIM(real_dkim):
+        def verify(self, idx):
+            return super().verify(idx=idx, dnsfunc=lambda name, timeout: dns_record)
+
+    monkeypatch.setattr(gm.dkim, "DKIM", _OfflineDKIM)
+    assert gm._gmail_verified_one_click_headers(signature + message)["from"]
+    tampered = (signature + message).replace(
+        b"List-Unsubscribe=One-Click", b"List-Unsubscribe=Not-One-Click"
+    )
+    with pytest.raises(ValueError, match="valid DKIM"):
+        gm._gmail_verified_one_click_headers(tampered)
+
+
+def test_gmail_one_click_unsubscribe_accepts_mailto_plus_https():
+    headers = gm._header_map(_eligible_unsubscribe_headers())
+    headers["list-unsubscribe"] = (
+        "<mailto:leave@example.com?subject=unsubscribe>, "
+        "<https://unsubscribe.example.com/u?opaque=token>"
+    )
+    url, address = gm._gmail_one_click_unsubscribe_url(headers, resolve_host=False)
+    assert url == "https://unsubscribe.example.com/u?opaque=token"
+    assert address is None
+
+
+def test_gmail_one_click_unsubscribe_accepts_case_insensitive_post_header():
+    headers = gm._header_map(_eligible_unsubscribe_headers())
+    headers["list-unsubscribe-post"] = "list-unsubscribe=one-click"
+    url, address = gm._gmail_one_click_unsubscribe_url(headers, resolve_host=False)
+    assert url.startswith("https://unsubscribe.bark.com/")
+    assert address is None
+
+
+def test_gmail_one_click_unsubscribe_rejects_private_dns_answer(monkeypatch):
+    monkeypatch.setattr(
+        gm.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(None, None, None, None, ("127.0.0.1", 443))],
+    )
+    with pytest.raises(ValueError, match="not public"):
+        gm._gmail_one_click_unsubscribe_url(
+            gm._header_map(_eligible_unsubscribe_headers()), resolve_host=True
+        )
+
+
 def test_gmail_one_click_unsubscribe_redacts_provider_failure(monkeypatch):
+    _mock_valid_dkim(monkeypatch)
     secret_url = "https://unsubscribe.bark.com/u?opaque=secret-token"
     monkeypatch.setattr(
         gm,
@@ -244,7 +383,7 @@ def test_gmail_one_click_unsubscribe_redacts_provider_failure(monkeypatch):
     monkeypatch.setattr(
         gm,
         "_gmail_unsubscribe_http_post",
-        lambda url: (_ for _ in ()).throw(RuntimeError(f"failed at {url}")),
+        lambda url, address: (_ for _ in ()).throw(RuntimeError(f"failed at {url}")),
     )
     raw = asyncio.run(
         gm.gmail_one_click_unsubscribe(
@@ -264,20 +403,39 @@ def test_gmail_unsubscribe_http_post_uses_rfc8058_body_and_disables_redirects(mo
     captured = {}
 
     class _Pool:
+        def __init__(self, address, **kwargs):
+            captured.update({"address": address, "pool_kwargs": kwargs})
+
         def request(self, method, url, **kwargs):
             captured.update({"method": method, "url": url, **kwargs})
-            return object()
+            return self
 
-    monkeypatch.setattr(gm.urllib3, "PoolManager", lambda: _Pool())
+        status = 204
+
+        def release_conn(self):
+            captured["released"] = True
+
+        def close(self):
+            captured["closed"] = True
+
+    monkeypatch.setattr(gm.urllib3, "HTTPSConnectionPool", _Pool)
     url = "https://unsubscribe.example.com/u?opaque=never-output-this"
-    gm._gmail_unsubscribe_http_post(url)
+    status = gm._gmail_unsubscribe_http_post(url, "93.184.216.34")
 
+    assert status == 204
     assert captured["method"] == "POST"
-    assert captured["url"] == url
+    assert captured["url"] == "/u?opaque=never-output-this"
+    assert captured["address"] == "93.184.216.34"
+    assert captured["pool_kwargs"]["assert_hostname"] == "unsubscribe.example.com"
+    assert captured["pool_kwargs"]["server_hostname"] == "unsubscribe.example.com"
+    assert captured["headers"]["Host"] == "unsubscribe.example.com"
     assert captured["body"] == b"List-Unsubscribe=One-Click"
     assert captured["headers"]["Content-Type"] == "application/x-www-form-urlencoded"
+    assert captured["assert_same_host"] is False
     assert captured["redirect"] is False
     assert captured["retries"] is False
+    assert captured["released"] is True
+    assert captured["closed"] is True
 
 
 def test_calendar_create_event_forwards_conference_and_attendee_update_options(monkeypatch):
