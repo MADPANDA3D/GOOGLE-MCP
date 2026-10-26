@@ -292,8 +292,12 @@ def test_gmail_one_click_unsubscribe_rejects_duplicate_and_unsigned_headers(monk
         gm._gmail_verified_one_click_headers(duplicate)
 
     unsigned = raw.replace(b"list-unsubscribe:list-unsubscribe-post", b"list-unsubscribe:list-id")
-    with pytest.raises(ValueError, match="covering both"):
+    with pytest.raises(ValueError, match="both one-click"):
         gm._gmail_verified_one_click_headers(unsigned)
+
+    unsigned_from = raw.replace(b"h=from:list-unsubscribe", b"h=list-unsubscribe")
+    with pytest.raises(ValueError, match="covering From"):
+        gm._gmail_verified_one_click_headers(unsigned_from)
 
 
 def test_gmail_one_click_unsubscribe_requires_cryptographically_valid_dkim(monkeypatch):

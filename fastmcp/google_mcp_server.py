@@ -1673,7 +1673,7 @@ def _gmail_verified_one_click_headers(raw_message: bytes) -> dict[str, str]:
     signatures = [value for name, value in headers if name == b"dkim-signature"]
     if not 1 <= len(signatures) <= 5:
         raise ValueError("Message lacks a bounded DKIM signature set for one-click unsubscribe.")
-    required = {b"list-unsubscribe", b"list-unsubscribe-post"}
+    required = {b"from", b"list-unsubscribe", b"list-unsubscribe-post"}
     for index, signature in enumerate(signatures):
         signed = re.search(rb"(?:^|;)\s*h\s*=\s*([^;]+)", signature, re.IGNORECASE)
         if not signed or not required <= {part.strip().lower() for part in signed[1].split(b":")}:
@@ -1687,7 +1687,9 @@ def _gmail_verified_one_click_headers(raw_message: bytes) -> dict[str, str]:
         except Exception:
             # DNS and malformed-signature failures must fail closed without exposing header data.
             continue
-    raise ValueError("Message lacks a valid DKIM signature covering both one-click headers.")
+    raise ValueError(
+        "Message lacks a valid DKIM signature covering From and both one-click headers."
+    )
 
 
 def _clamp_int(value: int, *, minimum: int, maximum: int) -> int:
