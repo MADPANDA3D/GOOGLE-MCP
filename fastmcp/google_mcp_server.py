@@ -4516,19 +4516,36 @@ async def gmail_get_thread(
     def _get_thread():
         if not thread_id:
             raise ValueError("thread_id cannot be empty")
-        service, cached = client.get_service("gmail", "v1")
+        session, cached = client.get_session()
         effective_headers = metadata_headers or list(DEFAULT_GMAIL_METADATA_HEADERS)
-        request = (
-            service.users()
-            .threads()
-            .get(
-                userId="me",
-                id=thread_id,
-                format=format,
-                metadataHeaders=effective_headers if format == "metadata" else None,
-            )
+        params: dict[str, Any] = {"format": format}
+        if format == "metadata":
+            params["metadataHeaders"] = effective_headers
+        thread_path = urllib.parse.quote(thread_id, safe="")
+        response = session.request(
+            "GET",
+            f"https://gmail.googleapis.com/gmail/v1/users/me/threads/{thread_path}",
+            params=params,
+            stream=True,
+            allow_redirects=False,
         )
-        return request.execute(), {"cached_service": cached}
+        response_payload = _bounded_provider_payload(response, "Gmail thread")
+        if not response.ok:
+            raise _provider_error(
+                "Gmail",
+                response_payload,
+                status=response.status_code,
+                retry_after=_retry_after_seconds(dict(response.headers or {})),
+            )
+        thread = response_payload.get("json")
+        if not isinstance(thread, dict):
+            raise GoogleProviderError(
+                "Gmail returned an invalid thread response.",
+                error_type="invalid_provider_response",
+                status=response.status_code,
+                action="Retry the thread request or use format=metadata.",
+            )
+        return thread, {"cached_session": cached, "provider_calls": 1}
 
     return await run_tool(
         "gmail",

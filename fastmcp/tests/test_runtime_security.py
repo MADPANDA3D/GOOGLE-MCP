@@ -388,6 +388,56 @@ class _AttachmentClient:
         return False
 
 
+def test_gmail_full_thread_uses_bounded_session_and_closes_response(monkeypatch):
+    thread = _StreamingJsonResponse(
+        {
+            "id": "thread/with/slash",
+            "messages": [{"id": "message-1", "payload": {"body": {"data": "Ym9keQ"}}}],
+        }
+    )
+    session = _AttachmentSession(thread)
+    monkeypatch.setattr(gm, "client", _AttachmentClient(session))
+
+    result = json.loads(
+        asyncio.run(gm.gmail_get_thread(thread_id="thread/with/slash", format="full"))
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["messages"][0]["id"] == "message-1"
+    assert result["meta"]["provider_calls"] == 1
+    assert result["meta"]["cached_session"] is False
+    method, url, kwargs = session.calls[0]
+    assert method == "GET"
+    assert url.endswith("/threads/thread%2Fwith%2Fslash")
+    assert kwargs["params"] == {"format": "full"}
+    assert kwargs["stream"] is True
+    assert kwargs["allow_redirects"] is False
+    assert thread.closed is True
+
+
+def test_gmail_metadata_thread_forwards_headers_on_bounded_session(monkeypatch):
+    thread = _StreamingJsonResponse({"id": "thread-1", "messages": []})
+    session = _AttachmentSession(thread)
+    monkeypatch.setattr(gm, "client", _AttachmentClient(session))
+
+    result = json.loads(
+        asyncio.run(
+            gm.gmail_get_thread(
+                thread_id="thread-1",
+                format="metadata",
+                metadata_headers=["From", "Subject"],
+            )
+        )
+    )
+
+    assert result["ok"] is True
+    assert session.calls[0][2]["params"] == {
+        "format": "metadata",
+        "metadataHeaders": ["From", "Subject"],
+    }
+    assert thread.closed is True
+
+
 def test_gmail_attachment_metadata_only_never_fetches_content(monkeypatch):
     metadata = _StreamingJsonResponse({"size": 7})
     session = _AttachmentSession(metadata)
