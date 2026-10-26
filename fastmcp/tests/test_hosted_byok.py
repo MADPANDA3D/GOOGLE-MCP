@@ -396,6 +396,22 @@ def test_gmail_one_click_unsubscribe_preview_rejects_private_destination(monkeyp
     assert "not public" in payload["error"]["message"]
 
 
+def test_gmail_one_click_unsubscribe_redacts_malformed_url(monkeypatch):
+    _mock_valid_dkim(monkeypatch)
+    token = "private-unsubscribe-token"
+    headers = _eligible_unsubscribe_headers(f"https://[{token}]/u")
+    monkeypatch.setattr(gm, "client", _UnsubscribeClient(_UnsubscribeService(headers=headers)))
+    raw = asyncio.run(
+        gm.gmail_preview_one_click_unsubscribe(
+            message_id="message-1", expected_mailbox="leolara@madpanda3d.com"
+        )
+    )
+    payload = json.loads(raw)
+    assert payload["ok"] is False
+    assert "malformed URI" in payload["error"]["message"]
+    assert token not in raw
+
+
 def test_gmail_one_click_unsubscribe_redacts_provider_failure(monkeypatch):
     _mock_valid_dkim(monkeypatch)
     secret_url = "https://unsubscribe.bark.com/u?opaque=secret-token"

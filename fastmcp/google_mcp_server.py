@@ -1587,23 +1587,29 @@ def _gmail_one_click_unsubscribe_url(
             "List-Unsubscribe has invalid URI syntax."
         )
     candidates = [item.strip() for item in re.findall(r"<([^<>]+)>", raw_header)]
-    schemes = [urllib.parse.urlsplit(item).scheme.lower() for item in candidates]
+    try:
+        schemes = [urllib.parse.urlsplit(item).scheme.lower() for item in candidates]
+    except ValueError:
+        raise ValueError("List-Unsubscribe contains a malformed URI.") from None
     urls = [item for item, scheme in zip(candidates, schemes) if scheme == "https"]
     if len(urls) != 1 or any(not scheme or scheme == "http" for scheme in schemes):
         raise ValueError("List-Unsubscribe requires exactly one HTTPS URI and no HTTP URI.")
     url = str(urls[0])
-    parsed = urllib.parse.urlsplit(url)
-    if parsed.scheme.lower() != "https" or not parsed.hostname:
-        raise ValueError("One-click unsubscribe requires a valid HTTPS URL.")
-    if parsed.username is not None or parsed.password is not None or parsed.fragment:
-        raise ValueError("One-click unsubscribe URL contains unsupported components.")
     try:
+        parsed = urllib.parse.urlsplit(url)
+        hostname = parsed.hostname
+        username = parsed.username
+        password = parsed.password
         port = parsed.port
-    except ValueError as exc:
-        raise ValueError("One-click unsubscribe URL contains an invalid port.") from exc
+    except ValueError:
+        raise ValueError("One-click unsubscribe URL is malformed.") from None
+    if parsed.scheme.lower() != "https" or not hostname:
+        raise ValueError("One-click unsubscribe requires a valid HTTPS URL.")
+    if username is not None or password is not None or parsed.fragment:
+        raise ValueError("One-click unsubscribe URL contains unsupported components.")
     if port not in {None, 443}:
         raise ValueError("One-click unsubscribe only permits the standard HTTPS port.")
-    hostname = parsed.hostname.rstrip(".").lower()
+    hostname = hostname.rstrip(".").lower()
     if hostname == "localhost" or hostname.endswith(".localhost"):
         raise ValueError("One-click unsubscribe URL host is not public.")
     address = None
