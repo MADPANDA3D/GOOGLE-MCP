@@ -30,9 +30,11 @@ from html.parser import HTMLParser
 from typing import Any, Callable
 
 import dkim
+import httplib2
 import urllib3
 import uvicorn
 from google.auth.exceptions import RefreshError
+from google_auth_httplib2 import AuthorizedHttp
 from google.auth.transport.requests import AuthorizedSession, Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -128,6 +130,10 @@ MCP_LOG_LEVEL = os.getenv("MCP_LOG_LEVEL", "INFO")
 MCP_RETRY_MAX = int(os.getenv("MCP_RETRY_MAX", "2"))
 MCP_RETRY_BASE_SECONDS = float(os.getenv("MCP_RETRY_BASE_SECONDS", "0.5"))
 MCP_RETRY_MAX_SECONDS = float(os.getenv("MCP_RETRY_MAX_SECONDS", "4.0"))
+MCP_GOOGLE_API_TIMEOUT_SECONDS = max(
+    1.0,
+    min(float(os.getenv("MCP_GOOGLE_API_TIMEOUT_SECONDS", "7.0")), 30.0),
+)
 MCP_MAX_BATCH_ITEMS = max(1, min(int(os.getenv("MCP_MAX_BATCH_ITEMS", "1000")), 10000))
 MCP_MAX_PROVIDER_CALLS_PER_TOOL = max(
     1,
@@ -324,7 +330,11 @@ class GoogleWorkspaceClient:
         with self._lock:
             if cache_key in self._service_cache:
                 return self._service_cache[cache_key], True
-            service = build(api_name, api_version, credentials=creds, cache_discovery=False)
+            transport = AuthorizedHttp(
+                creds,
+                http=httplib2.Http(timeout=MCP_GOOGLE_API_TIMEOUT_SECONDS),
+            )
+            service = build(api_name, api_version, http=transport, cache_discovery=False)
             self._service_cache[cache_key] = service
             return service, False
 
@@ -858,6 +868,12 @@ def _classify_error(exc: Exception) -> dict[str, Any]:
             "message": "Google OAuth credential refresh failed.",
             "action": "Verify the request-scoped Google OAuth credentials.",
         }
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return {
+            "type": "upstream_timeout",
+            "message": "Google API request timed out before the broker deadline.",
+            "action": "Retry the bounded request; narrow the query if timeouts continue.",
+        }
     if isinstance(exc, HttpError):
         status = getattr(exc, "status_code", None)
         if status is None and getattr(exc, "resp", None) is not None:
@@ -893,6 +909,8 @@ def _classify_error(exc: Exception) -> dict[str, Any]:
 
 
 def _is_retryable(exc: Exception) -> bool:
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return True
     if not isinstance(exc, HttpError):
         return False
     status = getattr(exc, "status_code", None)

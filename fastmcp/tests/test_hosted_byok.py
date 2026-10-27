@@ -2194,6 +2194,88 @@ def test_byok_refresh_uses_existing_grant_scopes(monkeypatch):
     assert calls["scopes"] is None
 
 
+def test_google_service_transport_has_bounded_timeout(monkeypatch):
+    calls = {}
+
+    class _FakeCreds:
+        valid = True
+
+    class _FakeHttp:
+        def __init__(self, *, timeout):
+            calls["timeout"] = timeout
+
+    def _fake_authorized_http(credentials, *, http):
+        calls["credentials"] = credentials
+        calls["http"] = http
+        return "authorized-http"
+
+    def _fake_build(api_name, api_version, **kwargs):
+        calls["build"] = (api_name, api_version, kwargs)
+        return "gmail-service"
+
+    monkeypatch.setattr(gm.httplib2, "Http", _FakeHttp)
+    monkeypatch.setattr(gm, "AuthorizedHttp", _fake_authorized_http)
+    monkeypatch.setattr(gm, "build", _fake_build)
+    workspace = gm.GoogleWorkspaceClient(None, None, [], persist_token=False)
+    monkeypatch.setattr(workspace, "_load_credentials", lambda: _FakeCreds())
+
+    service, cached = workspace.get_service("gmail", "v1")
+
+    assert service == "gmail-service"
+    assert cached is False
+    assert calls["timeout"] == gm.MCP_GOOGLE_API_TIMEOUT_SECONDS
+    assert calls["build"] == (
+        "gmail",
+        "v1",
+        {"http": "authorized-http", "cache_discovery": False},
+    )
+
+
+def test_run_tool_retries_transient_socket_timeouts(monkeypatch):
+    attempts = 0
+
+    async def _no_sleep(_delay):
+        return None
+
+    def _eventually_succeeds():
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise TimeoutError("provider stalled")
+        return {"messages": [{"id": "message-1"}]}
+
+    monkeypatch.setattr(gm.asyncio, "sleep", _no_sleep)
+    payload = json.loads(
+        asyncio.run(gm.run_tool("gmail", "search_messages", _eventually_succeeds))
+    )
+
+    assert payload["ok"] is True
+    assert payload["data"]["messages"][0]["id"] == "message-1"
+    assert payload["meta"]["retry_count"] == 2
+    assert attempts == 3
+
+
+def test_run_tool_returns_structured_upstream_timeout(monkeypatch):
+    async def _no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(gm.asyncio, "sleep", _no_sleep)
+    payload = json.loads(
+        asyncio.run(
+            gm.run_tool(
+                "gmail",
+                "search_messages",
+                lambda: (_ for _ in ()).throw(TimeoutError("provider stalled")),
+            )
+        )
+    )
+
+    assert payload["ok"] is False
+    assert payload["error"]["type"] == "upstream_timeout"
+    assert "provider stalled" not in json.dumps(payload)
+    assert payload["meta"]["retry_count"] == gm.MCP_RETRY_MAX
+
+
 def test_token_file_refresh_uses_existing_grant_scopes(monkeypatch, tmp_path):
     calls = {}
     token_path = tmp_path / "token.json"
