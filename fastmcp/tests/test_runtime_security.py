@@ -290,6 +290,50 @@ def test_tool_output_and_provider_errors_are_bounded_and_redacted(monkeypatch):
     assert "[REDACTED]" in error["message"]
 
 
+def test_read_tools_retry_transport_timeouts(monkeypatch):
+    attempts = 0
+
+    def _transient_timeout():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise TimeoutError("synthetic upstream timeout")
+        return {"messages": []}
+
+    monkeypatch.setattr(gm, "MCP_RETRY_MAX", 1)
+    monkeypatch.setattr(gm, "_retry_delay_seconds", lambda *_args: 0)
+
+    payload = json.loads(asyncio.run(gm.run_tool("gmail", "search_messages", _transient_timeout)))
+
+    assert payload["ok"] is True
+    assert payload["data"] == {"messages": []}
+    assert payload["meta"]["retry_count"] == 1
+    assert attempts == 2
+
+
+def test_transport_timeout_has_actionable_error_and_writes_do_not_retry(monkeypatch):
+    attempts = 0
+
+    def _timeout():
+        nonlocal attempts
+        attempts += 1
+        raise TimeoutError("synthetic upstream timeout")
+
+    monkeypatch.setattr(gm, "MCP_RETRY_MAX", 2)
+    payload = json.loads(
+        asyncio.run(gm.run_tool("gmail", "send_message", _timeout, allow_retry=False))
+    )
+
+    assert payload["ok"] is False
+    assert payload["error"] == {
+        "type": "upstream_timeout",
+        "message": "Google API request timed out.",
+        "action": "Retry after a short delay.",
+    }
+    assert payload["meta"]["retry_count"] == 0
+    assert attempts == 1
+
+
 def test_direct_provider_responses_are_bounded_before_json_decode(monkeypatch):
     monkeypatch.setattr(gm, "MCP_PROVIDER_RESPONSE_MAX_BYTES", 4096)
 
