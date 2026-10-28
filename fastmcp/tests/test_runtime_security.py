@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import ssl
 import stat
 import sys
 from pathlib import Path
@@ -309,6 +310,50 @@ def test_read_tools_retry_transport_timeouts(monkeypatch):
     assert payload["data"] == {"messages": []}
     assert payload["meta"]["retry_count"] == 1
     assert attempts == 2
+
+
+def test_read_tools_retry_transient_tls_failures(monkeypatch):
+    attempts = 0
+
+    def _transient_tls_failure():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ssl.SSLError("synthetic WRONG_VERSION_NUMBER")
+        return {"id": "message-1"}
+
+    monkeypatch.setattr(gm, "MCP_RETRY_MAX", 1)
+    monkeypatch.setattr(gm, "_retry_delay_seconds", lambda *_args: 0)
+
+    payload = json.loads(asyncio.run(gm.run_tool("gmail", "get_message", _transient_tls_failure)))
+
+    assert payload["ok"] is True
+    assert payload["data"] == {"id": "message-1"}
+    assert payload["meta"]["retry_count"] == 1
+    assert attempts == 2
+
+
+def test_tls_failure_has_actionable_error_and_writes_do_not_retry(monkeypatch):
+    attempts = 0
+
+    def _tls_failure():
+        nonlocal attempts
+        attempts += 1
+        raise ssl.SSLError("synthetic WRONG_VERSION_NUMBER")
+
+    monkeypatch.setattr(gm, "MCP_RETRY_MAX", 2)
+    payload = json.loads(
+        asyncio.run(gm.run_tool("gmail", "send_message", _tls_failure, allow_retry=False))
+    )
+
+    assert payload["ok"] is False
+    assert payload["error"] == {
+        "type": "upstream_connection_error",
+        "message": "Google API connection failed.",
+        "action": "Retry after a short delay.",
+    }
+    assert payload["meta"]["retry_count"] == 0
+    assert attempts == 1
 
 
 def test_transport_timeout_has_actionable_error_and_writes_do_not_retry(monkeypatch):
