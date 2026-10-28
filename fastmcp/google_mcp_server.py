@@ -13,6 +13,7 @@ import os
 import random
 import re
 import socket
+import ssl
 import tempfile
 import threading
 import time
@@ -864,6 +865,12 @@ def _classify_error(exc: Exception) -> dict[str, Any]:
             "message": "Google API request timed out.",
             "action": "Retry after a short delay.",
         }
+    if isinstance(exc, (ConnectionError, ssl.SSLError)):
+        return {
+            "type": "upstream_connection_error",
+            "message": "Google API connection failed.",
+            "action": "Retry after a short delay.",
+        }
     if isinstance(exc, HttpError):
         status = getattr(exc, "status_code", None)
         if status is None and getattr(exc, "resp", None) is not None:
@@ -899,7 +906,7 @@ def _classify_error(exc: Exception) -> dict[str, Any]:
 
 
 def _is_retryable(exc: Exception) -> bool:
-    if isinstance(exc, TimeoutError):
+    if isinstance(exc, (TimeoutError, ConnectionError, ssl.SSLError)):
         return True
     if not isinstance(exc, HttpError):
         return False
