@@ -2194,6 +2194,48 @@ def test_byok_refresh_uses_existing_grant_scopes(monkeypatch):
     assert calls["scopes"] is None
 
 
+def test_google_discovery_service_uses_bounded_http_transport(monkeypatch):
+    calls = {}
+
+    class _FakeCreds:
+        valid = True
+
+    class _FakeHttp:
+        def __init__(self, *, timeout):
+            calls["timeout"] = timeout
+
+    class _FakeAuthorizedHttp:
+        def __init__(self, creds, *, http):
+            calls["creds"] = creds
+            calls["http"] = http
+            calls["authorized_http"] = self
+
+    service = object()
+
+    def _fake_build(api_name, api_version, *, http, cache_discovery):
+        calls["build"] = (api_name, api_version, http, cache_discovery)
+        return service
+
+    monkeypatch.setattr(gm.httplib2, "Http", _FakeHttp)
+    monkeypatch.setattr(gm, "AuthorizedHttp", _FakeAuthorizedHttp)
+    monkeypatch.setattr(gm, "build", _fake_build)
+    monkeypatch.setattr(gm, "MCP_PROVIDER_TIMEOUT_SECONDS", 7.5)
+
+    workspace = gm.GoogleWorkspaceClient(None, None, ["scope"])
+    monkeypatch.setattr(workspace, "_load_credentials", lambda: _FakeCreds())
+
+    first, first_cached = workspace.get_service("gmail", "v1")
+    second, second_cached = workspace.get_service("gmail", "v1")
+
+    assert first is service
+    assert second is service
+    assert first_cached is False
+    assert second_cached is True
+    assert calls["timeout"] == 7.5
+    assert calls["creds"].valid is True
+    assert calls["build"] == ("gmail", "v1", calls["authorized_http"], False)
+
+
 def test_token_file_refresh_uses_existing_grant_scopes(monkeypatch, tmp_path):
     calls = {}
     token_path = tmp_path / "token.json"
