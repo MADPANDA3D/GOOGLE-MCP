@@ -931,6 +931,17 @@ def test_batch_and_provider_fanout_limits_fail_before_provider_resolution(monkey
     with pytest.raises(ValueError, match="128-item execution limit"):
         gm._validate_tool_execution_limits(provider_fanout_payload)
 
+    gmail_batch_payload = {
+        "jsonrpc": "2.0",
+        "id": 12,
+        "method": "tools/call",
+        "params": {
+            "name": "gmail_batch_get_metadata",
+            "arguments": {"message_ids": [f"synthetic-{index}" for index in range(500)]},
+        },
+    }
+    gm._validate_tool_execution_limits(gmail_batch_payload)
+
     scan_payload = {
         "jsonrpc": "2.0",
         "id": 11,

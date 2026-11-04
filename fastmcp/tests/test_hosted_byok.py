@@ -1846,6 +1846,40 @@ def test_gmail_metadata_fetch_uses_google_batch_requests():
     assert results[0]["headers"]["from"] == "News <news@example.com>"
 
 
+def test_gmail_batch_get_metadata_chunks_500_ids(monkeypatch):
+    captured = {}
+    service = object()
+
+    monkeypatch.setattr(
+        gm.client,
+        "get_service",
+        lambda api, version: (service, True),
+    )
+
+    def _batch_get(selected_service, message_ids, metadata_headers, *, max_messages):
+        captured.update(
+            service=selected_service,
+            message_ids=message_ids,
+            metadata_headers=metadata_headers,
+            max_messages=max_messages,
+        )
+        return [{"id": message_id} for message_id in message_ids]
+
+    monkeypatch.setattr(gm, "_gmail_get_metadata_batch", _batch_get)
+    message_ids = [f"m{index}" for index in range(500)]
+
+    payload = json.loads(asyncio.run(gm.gmail_batch_get_metadata(message_ids)))
+
+    assert payload["ok"] is True
+    assert len(payload["data"]["messages"]) == 500
+    assert captured == {
+        "service": service,
+        "message_ids": message_ids,
+        "metadata_headers": list(gm.DEFAULT_GMAIL_METADATA_HEADERS),
+        "max_messages": 500,
+    }
+
+
 def test_workspace_create_tools_request_compact_fields(monkeypatch):
     captured = {}
 
