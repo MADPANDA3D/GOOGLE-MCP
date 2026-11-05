@@ -5187,8 +5187,73 @@ async def gmail_get_label(label_id: str) -> str:
         if not label_id:
             raise ValueError("label_id cannot be empty")
         service, cached = client.get_service("gmail", "v1")
-        request = service.users().labels().get(userId="me", id=label_id)
-        return request.execute(), {"cached_service": cached}
+        labels = service.users().labels()
+        request = labels.get(userId="me", id=label_id)
+        try:
+            return request.execute(), {"cached_service": cached}
+        except HttpError as exc:
+            status = getattr(exc, "status_code", None)
+            if status is None and getattr(exc, "resp", None) is not None:
+                status = getattr(exc.resp, "status", None)
+            if status != 404:
+                raise
+
+            # Gmail can expose virtual system labels (notably UNREAD) from
+            # labels.list while rejecting the same ID at labels.get. Verify
+            # that the ID really was advertised before deriving useful,
+            # read-only count estimates; unknown IDs must retain the 404.
+            listed = labels.list(
+                userId="me",
+                fields="labels(id,name,type,labelListVisibility,messageListVisibility)",
+            ).execute()
+            label = next(
+                (item for item in listed.get("labels", []) or [] if item.get("id") == label_id),
+                None,
+            )
+            if label is None:
+                raise
+
+            message_counts = (
+                service.users()
+                .messages()
+                .list(
+                    userId="me",
+                    labelIds=[label_id],
+                    includeSpamTrash=True,
+                    maxResults=1,
+                    fields="resultSizeEstimate",
+                )
+                .execute()
+            )
+            thread_counts = (
+                service.users()
+                .threads()
+                .list(
+                    userId="me",
+                    labelIds=[label_id],
+                    includeSpamTrash=True,
+                    maxResults=1,
+                    fields="resultSizeEstimate",
+                )
+                .execute()
+            )
+            messages_total = int(message_counts.get("resultSizeEstimate", 0) or 0)
+            threads_total = int(thread_counts.get("resultSizeEstimate", 0) or 0)
+            label = {
+                **label,
+                "messagesTotal": messages_total,
+                "threadsTotal": threads_total,
+                "countSource": "list_result_size_estimate",
+            }
+            if label_id == "UNREAD":
+                label["messagesUnread"] = messages_total
+                label["threadsUnread"] = threads_total
+            return label, {
+                "cached_service": cached,
+                "warnings": [
+                    "Gmail rejected labels.get for an advertised label; counts are list estimates.",
+                ],
+            }
 
     return await run_tool("gmail", "get_label", _get_label, allow_retry=True)
 

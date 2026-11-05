@@ -1644,6 +1644,87 @@ def test_gmail_mailbox_overview_caps_labels(monkeypatch):
     assert [label["id"] for label in payload["data"]["labels"]] == ["A", "B"]
 
 
+def test_gmail_get_label_falls_back_for_advertised_virtual_system_label(monkeypatch):
+    class _NotFoundResponse(dict):
+        status = 404
+        reason = "Not Found"
+
+    class _FakeRequest:
+        def __init__(self, data=None, error=None):
+            self.data = data
+            self.error = error
+
+        def execute(self):
+            if self.error is not None:
+                raise self.error
+            return self.data
+
+    class _FakeLabels:
+        def get(self, **kwargs):
+            assert kwargs == {"userId": "me", "id": "UNREAD"}
+            error = gm.HttpError(_NotFoundResponse(), b'{"error":{"code":404}}')
+            return _FakeRequest(error=error)
+
+        def list(self, **kwargs):
+            assert kwargs["userId"] == "me"
+            return _FakeRequest({"labels": [{"id": "UNREAD", "name": "UNREAD", "type": "system"}]})
+
+    class _FakeCollection:
+        def __init__(self, estimate):
+            self.estimate = estimate
+
+        def list(self, **kwargs):
+            assert kwargs == {
+                "userId": "me",
+                "labelIds": ["UNREAD"],
+                "includeSpamTrash": True,
+                "maxResults": 1,
+                "fields": "resultSizeEstimate",
+            }
+            return _FakeRequest({"resultSizeEstimate": self.estimate})
+
+    class _FakeUsers:
+        def labels(self):
+            return _FakeLabels()
+
+        def messages(self):
+            return _FakeCollection(17)
+
+        def threads(self):
+            return _FakeCollection(12)
+
+    class _FakeService:
+        def users(self):
+            return _FakeUsers()
+
+    class _FakeClient:
+        def get_service(self, api_name, api_version):
+            assert (api_name, api_version) == ("gmail", "v1")
+            return _FakeService(), False
+
+        def is_session_cached(self):
+            return False
+
+    monkeypatch.setattr(gm, "client", _FakeClient())
+
+    payload = json.loads(asyncio.run(gm.gmail_get_label("UNREAD")))
+
+    assert payload["ok"] is True
+    assert payload["data"] == {
+        "id": "UNREAD",
+        "name": "UNREAD",
+        "type": "system",
+        "messagesTotal": 17,
+        "threadsTotal": 12,
+        "countSource": "list_result_size_estimate",
+        "messagesUnread": 17,
+        "threadsUnread": 12,
+    }
+    assert payload["meta"]["warnings"] == [
+        "Gmail rejected labels.get for an advertised label; counts are list estimates.",
+    ]
+
+
 def test_gmail_sender_clusters_obeys_sample_limit(monkeypatch):
     class _FakeClient:
         def get_service(self, api_name, api_version):
