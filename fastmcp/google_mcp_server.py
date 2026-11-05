@@ -879,9 +879,15 @@ def _classify_error(exc: Exception) -> dict[str, Any]:
         retry_after = _retry_after_seconds(headers)
         error_type = "api_error"
         action = "Review the Google API error and adjust the request."
-        if status in {401, 403}:
+        if status == 401:
             error_type = "auth_error"
-            action = "Verify OAuth scopes and credentials."
+            action = "Verify the request-scoped Google OAuth credentials."
+        elif status == 403:
+            error_type = "permission_denied"
+            action = (
+                "Verify the required OAuth scopes, enable the Google API, and confirm the "
+                "authenticated account can access the requested resource."
+            )
         elif status == 404:
             error_type = "not_found"
             action = "Confirm the resource ID exists and is accessible."
