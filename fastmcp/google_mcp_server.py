@@ -3089,6 +3089,8 @@ async def drive_search_files(
             fields=effective_fields,
             orderBy=order_by or None,
             pageToken=page_token or None,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
         )
         data = request.execute()
         return _attach_page_meta(data, cached)
