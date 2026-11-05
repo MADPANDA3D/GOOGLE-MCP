@@ -5255,7 +5255,7 @@ async def gmail_get_label(label_id: str) -> str:
             return label, {
                 "cached_service": cached,
                 "warnings": [
-                    "Gmail rejected labels.get for an advertised label; counts are list estimates."
+                    "Gmail rejected labels.get for an advertised label; counts are list estimates.",
                 ],
             }
 

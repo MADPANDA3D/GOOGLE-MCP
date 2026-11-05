@@ -1723,7 +1723,7 @@ def test_gmail_get_label_falls_back_for_advertised_virtual_system_label(monkeypa
         "threadsUnread": 12,
     }
     assert payload["meta"]["warnings"] == [
-        "Gmail rejected labels.get for an advertised label; counts are list estimates."
+        "Gmail rejected labels.get for an advertised label; counts are list estimates.",
     ]
 
 
