@@ -350,6 +350,62 @@ def test_search_console_forbidden_is_reported_as_permission_denied(monkeypatch):
     assert payload["meta"]["retry_count"] == 0
 
 
+def test_drive_search_files_includes_shared_drive_items(monkeypatch):
+    query = "'shared-folder-id' in parents and trashed = false"
+
+    class _FakeRequest:
+        def execute(self):
+            return {
+                "files": [
+                    {
+                        "id": "child-file-id",
+                        "name": "Child file",
+                        "parents": ["shared-folder-id"],
+                    }
+                ]
+            }
+
+    class _FakeFiles:
+        def list(self, **kwargs):
+            assert kwargs == {
+                "q": query,
+                "pageSize": 100,
+                "fields": gm.DEFAULT_DRIVE_FIELDS,
+                "orderBy": None,
+                "pageToken": None,
+                "supportsAllDrives": True,
+                "includeItemsFromAllDrives": True,
+            }
+            return _FakeRequest()
+
+    class _FakeService:
+        def files(self):
+            return _FakeFiles()
+
+    class _FakeClient:
+        def get_service(self, api_name, api_version):
+            assert (api_name, api_version) == ("drive", "v3")
+            return _FakeService(), False
+
+        def is_session_cached(self):
+            return False
+
+    monkeypatch.setattr(gm, "client", _FakeClient())
+
+    payload = json.loads(asyncio.run(gm.drive_search_files(query=query)))
+
+    assert payload["ok"] is True
+    assert payload["data"]["files"] == [
+        {
+            "id": "child-file-id",
+            "name": "Child file",
+            "parents": ["shared-folder-id"],
+        }
+    ]
+    assert payload["meta"]["api"] == "drive"
+    assert payload["meta"]["action"] == "search_files"
+
+
 def test_read_tools_retry_transport_timeouts(monkeypatch):
     attempts = 0
 
