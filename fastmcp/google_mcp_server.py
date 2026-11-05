@@ -5207,11 +5207,7 @@ async def gmail_get_label(label_id: str) -> str:
                 fields="labels(id,name,type,labelListVisibility,messageListVisibility)",
             ).execute()
             label = next(
-                (
-                    item
-                    for item in listed.get("labels", []) or []
-                    if item.get("id") == label_id
-                ),
+                (item for item in listed.get("labels", []) or [] if item.get("id") == label_id),
                 None,
             )
             if label is None:

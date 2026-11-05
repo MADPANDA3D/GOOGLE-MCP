@@ -1667,9 +1667,7 @@ def test_gmail_get_label_falls_back_for_advertised_virtual_system_label(monkeypa
 
         def list(self, **kwargs):
             assert kwargs["userId"] == "me"
-            return _FakeRequest(
-                {"labels": [{"id": "UNREAD", "name": "UNREAD", "type": "system"}]}
-            )
+            return _FakeRequest({"labels": [{"id": "UNREAD", "name": "UNREAD", "type": "system"}]})
 
     class _FakeCollection:
         def __init__(self, estimate):
