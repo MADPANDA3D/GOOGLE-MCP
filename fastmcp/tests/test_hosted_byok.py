@@ -897,6 +897,32 @@ def test_gmail_batch_metadata_camel_case_alias_is_normalized():
     assert args["metadata_headers"] == ["Subject"]
 
 
+def test_gmail_batch_metadata_uses_batched_provider_requests_for_500_ids(monkeypatch):
+    message_ids = [f"m{index}" for index in range(500)]
+    captured = {}
+
+    monkeypatch.setattr(gm.client, "get_service", lambda api, version: (object(), False))
+
+    def _batch(service, ids, metadata_headers, *, max_messages):
+        captured.update(
+            service=service,
+            ids=ids,
+            metadata_headers=metadata_headers,
+            max_messages=max_messages,
+        )
+        return [{"id": message_id} for message_id in ids]
+
+    monkeypatch.setattr(gm, "_gmail_get_metadata_batch", _batch)
+
+    payload = json.loads(asyncio.run(gm.gmail_batch_get_metadata(message_ids, ["Subject"])))
+
+    assert payload["ok"] is True
+    assert len(payload["data"]["messages"]) == 500
+    assert captured["ids"] == message_ids
+    assert captured["metadata_headers"] == ["Subject"]
+    assert captured["max_messages"] == 500
+
+
 def test_drive_upload_file_folder_aliases_are_normalized_to_parent_id():
     aliases = {
         "folder_id": "folder-1",
