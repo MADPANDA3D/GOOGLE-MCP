@@ -291,6 +291,65 @@ def test_tool_output_and_provider_errors_are_bounded_and_redacted(monkeypatch):
     assert "[REDACTED]" in error["message"]
 
 
+def test_search_console_forbidden_is_reported_as_permission_denied(monkeypatch):
+    class _ForbiddenResponse(dict):
+        status = 403
+        reason = "Forbidden"
+
+    class _FakeRequest:
+        def execute(self):
+            raise gm.HttpError(
+                _ForbiddenResponse(),
+                b'{"error":{"code":403,"message":"User does not have sufficient permission"}}',
+            )
+
+    class _FakeSearchAnalytics:
+        def query(self, **kwargs):
+            assert kwargs == {
+                "siteUrl": "sc-domain:example.com",
+                "body": {"startDate": "2026-10-08", "endDate": "2026-11-04"},
+            }
+            return _FakeRequest()
+
+    class _FakeService:
+        def searchanalytics(self):
+            return _FakeSearchAnalytics()
+
+    class _FakeClient:
+        def get_service(self, api_name, api_version):
+            assert (api_name, api_version) == ("searchconsole", "v1")
+            return _FakeService(), False
+
+        def is_session_cached(self):
+            return False
+
+    monkeypatch.setattr(gm, "client", _FakeClient())
+
+    payload = json.loads(
+        asyncio.run(
+            gm.searchconsole_query_search_analytics(
+                site_url="sc-domain:example.com",
+                request_body={"startDate": "2026-10-08", "endDate": "2026-11-04"},
+            )
+        )
+    )
+
+    assert payload["ok"] is False
+    assert payload["error"] == {
+        "type": "permission_denied",
+        "message": "Google API request failed with HTTP status 403.",
+        "status": 403,
+        "retry_after": None,
+        "action": (
+            "Verify the required OAuth scopes, enable the Google API, and confirm the "
+            "authenticated account can access the requested resource."
+        ),
+    }
+    assert payload["meta"]["api"] == "searchconsole"
+    assert payload["meta"]["action"] == "query_search_analytics"
+    assert payload["meta"]["retry_count"] == 0
+
+
 def test_read_tools_retry_transport_timeouts(monkeypatch):
     attempts = 0
 
