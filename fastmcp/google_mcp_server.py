@@ -1898,6 +1898,7 @@ def _gmail_get_metadata_batch(
             )
         return results
 
+    _validate_fanout_items(ids, "message_ids")
     for message_id in ids:
         if not message_id:
             continue
