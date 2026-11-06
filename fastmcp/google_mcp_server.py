@@ -1848,6 +1848,7 @@ def _gmail_get_metadata_batch(
     metadata_headers: list[str] | None = None,
     *,
     max_messages: int = 500,
+    preserve_raw_response: bool = False,
 ) -> list[dict[str, Any]]:
     headers = metadata_headers or [
         "From",
@@ -1872,20 +1873,26 @@ def _gmail_get_metadata_batch(
                 if exception is not None:
                     batch_errors.append(exception)
                     return
-                batch_results[str(request_id)] = _gmail_metadata_entry(response or {})
+                batch_results[str(request_id)] = (
+                    response or {}
+                    if preserve_raw_response
+                    else _gmail_metadata_entry(response or {})
+                )
 
             batch = service.new_batch_http_request(callback=_callback)
             for index, message_id in enumerate(chunk):
+                request_kwargs = {
+                    "userId": "me",
+                    "id": message_id,
+                    "format": "metadata",
+                    "metadataHeaders": headers,
+                }
+                if not preserve_raw_response:
+                    request_kwargs["fields"] = (
+                        "id,threadId,labelIds,snippet,internalDate,payload/headers"
+                    )
                 batch.add(
-                    service.users()
-                    .messages()
-                    .get(
-                        userId="me",
-                        id=message_id,
-                        format="metadata",
-                        metadataHeaders=headers,
-                        fields="id,threadId,labelIds,snippet,internalDate,payload/headers",
-                    ),
+                    service.users().messages().get(**request_kwargs),
                     request_id=str(index),
                 )
             batch.execute()
@@ -1902,19 +1909,16 @@ def _gmail_get_metadata_batch(
     for message_id in ids:
         if not message_id:
             continue
-        data = (
-            service.users()
-            .messages()
-            .get(
-                userId="me",
-                id=message_id,
-                format="metadata",
-                metadataHeaders=headers,
-                fields="id,threadId,labelIds,snippet,internalDate,payload/headers",
-            )
-            .execute()
-        )
-        results.append(_gmail_metadata_entry(data))
+        request_kwargs = {
+            "userId": "me",
+            "id": message_id,
+            "format": "metadata",
+            "metadataHeaders": headers,
+        }
+        if not preserve_raw_response:
+            request_kwargs["fields"] = "id,threadId,labelIds,snippet,internalDate,payload/headers"
+        data = service.users().messages().get(**request_kwargs).execute()
+        results.append(data if preserve_raw_response else _gmail_metadata_entry(data))
     return results
 
 
@@ -4779,6 +4783,7 @@ async def gmail_batch_get_metadata(
             message_ids,
             effective_headers,
             max_messages=len(message_ids),
+            preserve_raw_response=True,
         )
         return {"messages": results}, {"cached_service": cached}
 

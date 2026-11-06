@@ -90,6 +90,7 @@ def test_metadata_helper_batches_500_ids_in_100_provider_calls():
 
         def get(self, **kwargs):
             self.get_calls += 1
+            assert "fields" not in kwargs
             return _BatchRequest(kwargs["id"])
 
     batch_service = _BatchService()
@@ -97,11 +98,14 @@ def test_metadata_helper_batches_500_ids_in_100_provider_calls():
         batch_service,
         [f"m{index}" for index in range(500)],
         max_messages=500,
+        preserve_raw_response=True,
     )
     assert batch_sizes == [5] * 100
     assert batch_service.get_calls == 500
     assert len(results) == 500
     assert results[-1]["id"] == "m499"
+    assert results[-1]["payload"]["headers"] == []
+    assert "headers" not in results[-1]
 
 
 def test_public_metadata_batch_preserves_raw_gmail_response():

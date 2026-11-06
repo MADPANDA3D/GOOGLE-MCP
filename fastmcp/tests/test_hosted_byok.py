@@ -1856,12 +1856,20 @@ def test_gmail_batch_get_metadata_chunks_500_ids(monkeypatch):
         lambda api, version: (service, True),
     )
 
-    def _batch_get(selected_service, message_ids, metadata_headers, *, max_messages):
+    def _batch_get(
+        selected_service,
+        message_ids,
+        metadata_headers,
+        *,
+        max_messages,
+        preserve_raw_response,
+    ):
         captured.update(
             service=selected_service,
             message_ids=message_ids,
             metadata_headers=metadata_headers,
             max_messages=max_messages,
+            preserve_raw_response=preserve_raw_response,
         )
         return [{"id": message_id} for message_id in message_ids]
 
@@ -1877,6 +1885,7 @@ def test_gmail_batch_get_metadata_chunks_500_ids(monkeypatch):
         "message_ids": message_ids,
         "metadata_headers": list(gm.DEFAULT_GMAIL_METADATA_HEADERS),
         "max_messages": 500,
+        "preserve_raw_response": True,
     }
 
 
