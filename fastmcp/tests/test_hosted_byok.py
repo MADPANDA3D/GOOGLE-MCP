@@ -4,6 +4,7 @@ import json
 import logging
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -2469,8 +2470,9 @@ def test_concurrent_requests_keep_client_context_isolated(monkeypatch):
     assert second == "beta"
 
 
-def test_concurrent_calendar_get_event_keeps_provider_responses_correlated(monkeypatch):
+def test_concurrent_calendar_services_keep_provider_responses_correlated(monkeypatch):
     execution_barrier = threading.Barrier(2)
+    built_on_threads = []
 
     class _UnsafeSharedService:
         def __init__(self):
@@ -2492,7 +2494,11 @@ def test_concurrent_calendar_get_event_keeps_provider_responses_correlated(monke
 
             return _Request()
 
-    monkeypatch.setattr(gm, "build", lambda *_args, **_kwargs: _UnsafeSharedService())
+    def _build_service(*_args, **_kwargs):
+        built_on_threads.append(threading.get_ident())
+        return _UnsafeSharedService()
+
+    monkeypatch.setattr(gm, "build", _build_service)
     workspace = gm.GoogleWorkspaceClient(
         credentials_path=None,
         token_path=None,
@@ -2502,24 +2508,26 @@ def test_concurrent_calendar_get_event_keeps_provider_responses_correlated(monke
     )
     workspace._creds = SimpleNamespace(valid=True)
 
-    async def _run():
-        token = gm.ACTIVE_GOOGLE_CLIENT.set(workspace)
-        try:
-            return await asyncio.gather(
-                gm.calendar_get_event("primary", "event-alpha"),
-                gm.calendar_get_event("primary", "event-beta"),
-            )
-        finally:
-            gm.ACTIVE_GOOGLE_CLIENT.reset(token)
+    def _get_event(event_id):
+        service, cached = workspace.get_service("calendar", "v3")
+        request = service.events().get(
+            calendarId="primary",
+            eventId=event_id,
+            fields=gm.DEFAULT_EVENT_FIELDS,
+        )
+        return request.execute(), cached
 
-    first_raw, second_raw = asyncio.run(_run())
-    first = json.loads(first_raw)
-    second = json.loads(second_raw)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_future = executor.submit(_get_event, "event-alpha")
+        second_future = executor.submit(_get_event, "event-beta")
+        first, first_cached = first_future.result(timeout=10)
+        second, second_cached = second_future.result(timeout=10)
 
-    assert first["ok"] is True
-    assert second["ok"] is True
-    assert first["data"]["id"] == "event-alpha"
-    assert second["data"]["id"] == "event-beta"
+    assert first["id"] == "event-alpha"
+    assert second["id"] == "event-beta"
+    assert first_cached is False
+    assert second_cached is False
+    assert len(set(built_on_threads)) == 2
 
 
 def test_raw_request_unconditionally_blocks_non_google_hosts():
