@@ -3,6 +3,8 @@ import base64
 import json
 import logging
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -2466,6 +2468,66 @@ def test_concurrent_requests_keep_client_context_isolated(monkeypatch):
     first, second = asyncio.run(_run())
     assert first == "alpha"
     assert second == "beta"
+
+
+def test_concurrent_calendar_services_keep_provider_responses_correlated(monkeypatch):
+    execution_barrier = threading.Barrier(2)
+    built_on_threads = []
+
+    class _UnsafeSharedService:
+        def __init__(self):
+            self.pending_event_id = ""
+
+        def events(self):
+            return self
+
+        def get(self, *, calendarId, eventId, fields):
+            assert calendarId == "primary"
+            assert fields == gm.DEFAULT_EVENT_FIELDS
+            self.pending_event_id = eventId
+            service = self
+
+            class _Request:
+                def execute(self):
+                    execution_barrier.wait(timeout=5)
+                    return {"id": service.pending_event_id}
+
+            return _Request()
+
+    def _build_service(*_args, **_kwargs):
+        built_on_threads.append(threading.get_ident())
+        return _UnsafeSharedService()
+
+    monkeypatch.setattr(gm, "build", _build_service)
+    workspace = gm.GoogleWorkspaceClient(
+        credentials_path=None,
+        token_path=None,
+        scopes=["calendar"],
+        authorized_user_info={},
+        persist_token=False,
+    )
+    workspace._creds = SimpleNamespace(valid=True)
+
+    def _get_event(event_id):
+        service, cached = workspace.get_service("calendar", "v3")
+        request = service.events().get(
+            calendarId="primary",
+            eventId=event_id,
+            fields=gm.DEFAULT_EVENT_FIELDS,
+        )
+        return request.execute(), cached
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_future = executor.submit(_get_event, "event-alpha")
+        second_future = executor.submit(_get_event, "event-beta")
+        first, first_cached = first_future.result(timeout=10)
+        second, second_cached = second_future.result(timeout=10)
+
+    assert first["id"] == "event-alpha"
+    assert second["id"] == "event-beta"
+    assert first_cached is False
+    assert second_cached is False
+    assert len(set(built_on_threads)) == 2
 
 
 def test_raw_request_unconditionally_blocks_non_google_hosts():
