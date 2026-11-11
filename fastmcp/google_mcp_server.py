@@ -282,8 +282,19 @@ class GoogleWorkspaceClient:
         self.persist_token = persist_token
         self._lock = threading.Lock()
         self._creds: Credentials | None = None
-        self._service_cache: dict[tuple[str, str, tuple[str, ...]], Any] = {}
+        # google-api-python-client services own an httplib2.Http transport, which
+        # is not thread-safe. Provider calls run through asyncio.to_thread(), so
+        # keep discovery services local to the worker thread instead of sharing
+        # one transport across concurrent tool calls.
+        self._thread_services = threading.local()
         self._session: AuthorizedSession | None = None
+
+    def _service_cache(self) -> dict[tuple[str, str, tuple[str, ...]], Any]:
+        cache = getattr(self._thread_services, "cache", None)
+        if cache is None:
+            cache = {}
+            self._thread_services.cache = cache
+        return cache
 
     def _save_token(self, creds: Credentials) -> None:
         if not self.persist_token or not self.token_path:
@@ -322,12 +333,12 @@ class GoogleWorkspaceClient:
     def get_service(self, api_name: str, api_version: str) -> tuple[Any, bool]:
         creds = self._load_credentials()
         cache_key = (api_name, api_version, tuple(self.scopes))
-        with self._lock:
-            if cache_key in self._service_cache:
-                return self._service_cache[cache_key], True
-            service = build(api_name, api_version, credentials=creds, cache_discovery=False)
-            self._service_cache[cache_key] = service
-            return service, False
+        service_cache = self._service_cache()
+        if cache_key in service_cache:
+            return service_cache[cache_key], True
+        service = build(api_name, api_version, credentials=creds, cache_discovery=False)
+        service_cache[cache_key] = service
+        return service, False
 
     def build_service(self, api_name: str, api_version: str):
         service, _ = self.get_service(api_name, api_version)
@@ -347,8 +358,7 @@ class GoogleWorkspaceClient:
 
     def is_service_cached(self, api_name: str, api_version: str) -> bool:
         cache_key = (api_name, api_version, tuple(self.scopes))
-        with self._lock:
-            return cache_key in self._service_cache
+        return cache_key in self._service_cache()
 
     def is_session_cached(self) -> bool:
         with self._lock:

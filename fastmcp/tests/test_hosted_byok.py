@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -2466,6 +2467,59 @@ def test_concurrent_requests_keep_client_context_isolated(monkeypatch):
     first, second = asyncio.run(_run())
     assert first == "alpha"
     assert second == "beta"
+
+
+def test_concurrent_calendar_get_event_keeps_provider_responses_correlated(monkeypatch):
+    execution_barrier = threading.Barrier(2)
+
+    class _UnsafeSharedService:
+        def __init__(self):
+            self.pending_event_id = ""
+
+        def events(self):
+            return self
+
+        def get(self, *, calendarId, eventId, fields):
+            assert calendarId == "primary"
+            assert fields == gm.DEFAULT_EVENT_FIELDS
+            self.pending_event_id = eventId
+            service = self
+
+            class _Request:
+                def execute(self):
+                    execution_barrier.wait(timeout=5)
+                    return {"id": service.pending_event_id}
+
+            return _Request()
+
+    monkeypatch.setattr(gm, "build", lambda *_args, **_kwargs: _UnsafeSharedService())
+    workspace = gm.GoogleWorkspaceClient(
+        credentials_path=None,
+        token_path=None,
+        scopes=["calendar"],
+        authorized_user_info={},
+        persist_token=False,
+    )
+    workspace._creds = SimpleNamespace(valid=True)
+
+    async def _run():
+        token = gm.ACTIVE_GOOGLE_CLIENT.set(workspace)
+        try:
+            return await asyncio.gather(
+                gm.calendar_get_event("primary", "event-alpha"),
+                gm.calendar_get_event("primary", "event-beta"),
+            )
+        finally:
+            gm.ACTIVE_GOOGLE_CLIENT.reset(token)
+
+    first_raw, second_raw = asyncio.run(_run())
+    first = json.loads(first_raw)
+    second = json.loads(second_raw)
+
+    assert first["ok"] is True
+    assert second["ok"] is True
+    assert first["data"]["id"] == "event-alpha"
+    assert second["data"]["id"] == "event-beta"
 
 
 def test_raw_request_unconditionally_blocks_non_google_hosts():
