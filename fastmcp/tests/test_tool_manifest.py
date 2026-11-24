@@ -34,7 +34,7 @@ def test_provider_manifest_is_complete_deterministic_and_lossless():
     assert len(manifest["tools"]) == 153
     assert manifest["descriptorHash"] == _canonical_hash(manifest["tools"])
     assert manifest["descriptorHash"] == (
-        "57c54b4913c527d281cebfd45b11cec48d3e44fc60ab3a4605632f812d2db378"
+        "ad41975a2864b2d112f110e86e01e54fe4cd73edf33ddebc83aa29ce178f2b10"
     )
     assert STANDARD_NAVIGATION_TOOLS <= {item["nativeToolName"] for item in manifest["tools"]}
 
