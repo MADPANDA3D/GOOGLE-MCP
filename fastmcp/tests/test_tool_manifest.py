@@ -24,7 +24,7 @@ def test_provider_manifest_is_complete_deterministic_and_lossless():
     assert manifest["schemaVersion"] == "1.0.0"
     assert manifest["serviceId"] == "google"
     assert manifest["catalogVersion"] == CATALOG_VERSION
-    assert CATALOG_VERSION == "google-2026.10.26.1"
+    assert CATALOG_VERSION == "google-2026.11.24.1"
     assert manifest["counts"] == {
         "raw": 153,
         "agentReady": 146,
@@ -34,7 +34,7 @@ def test_provider_manifest_is_complete_deterministic_and_lossless():
     assert len(manifest["tools"]) == 153
     assert manifest["descriptorHash"] == _canonical_hash(manifest["tools"])
     assert manifest["descriptorHash"] == (
-        "7e1feec8775b6b63d11c2febcacec598b5267b55852938080055a93da6ad0e42"
+        "57c54b4913c527d281cebfd45b11cec48d3e44fc60ab3a4605632f812d2db378"
     )
     assert STANDARD_NAVIGATION_TOOLS <= {item["nativeToolName"] for item in manifest["tools"]}
 
@@ -60,7 +60,7 @@ def test_provider_manifest_is_complete_deterministic_and_lossless():
         "4e16f5f58f09417bf8a446fb235ece5dcef8d1044bd97824db170d229afb5ac8"
     )
     assert _canonical_hash(compatibility_projection) == (
-        "c041f5a59a95723da08bd18b665816f7ecb3d14f4668405eb523593259a6a509"
+        "d21e52116235f9d23ee6f3a556f6dd60eb03c58d1d1bbe4091fb6bdeafc9b6cd"
     )
 
     identities = set()
@@ -264,6 +264,20 @@ def test_tool_reference_resolves_canonical_name_and_is_lossless():
     )
     assert descriptor == expected
     assert descriptor["inputSchema"]["properties"]["upload_mode"]["description"]
+
+
+def test_mime_type_enum_is_scoped_to_slides_thumbnail_tool():
+    by_name = {item["nativeToolName"]: item for item in gm._current_tool_manifest()["tools"]}
+
+    drive_mime = by_name["drive_upload_file"]["inputSchema"]["properties"]["mime_type"]
+    slides_mime = by_name["slides_get_page_thumbnail"]["inputSchema"]["properties"][
+        "mime_type"
+    ]
+
+    assert drive_mime["type"] == "string"
+    assert drive_mime["default"] == "text/plain"
+    assert "enum" not in drive_mime
+    assert slides_mime["enum"] == ["PNG", "JPEG"]
 
 
 def test_health_reports_catalog_build_and_contract_counts():

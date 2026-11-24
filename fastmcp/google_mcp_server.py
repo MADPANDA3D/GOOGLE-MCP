@@ -2621,6 +2621,10 @@ PARAMETER_ENUMS = {
     "api": ["", "drive", "docs", "sheets", "slides", "gmail", "calendar"],
 }
 
+TOOL_PARAMETER_ENUMS = {
+    ("slides_get_page_thumbnail", "mime_type"): ["PNG", "JPEG"],
+}
+
 CAPABILITY_GROUPS = [
     {
         "category": "Drive API v3 files",
@@ -3006,7 +3010,10 @@ def _apply_tool_metadata() -> None:
         for parameter_name, schema in properties.items():
             if isinstance(schema, dict):
                 schema.setdefault("description", _parameter_description(name, parameter_name))
-                enum_values = PARAMETER_ENUMS.get(parameter_name)
+                enum_values = TOOL_PARAMETER_ENUMS.get(
+                    (name, parameter_name),
+                    PARAMETER_ENUMS.get(parameter_name),
+                )
                 if enum_values and "enum" not in schema:
                     schema["enum"] = enum_values
 
@@ -8102,7 +8109,6 @@ def _extend_expanded_google_surface_metadata() -> None:
             "action": ["label", "archive", "mark_read", "trash"],
             "proposed_action": ["label", "archive", "mark_read", "trash"],
             "thumbnail_size": ["THUMBNAIL_SIZE_UNSPECIFIED", "LARGE", "MEDIUM", "SMALL"],
-            "mime_type": ["PNG", "JPEG"],
             "insert_data_option": ["OVERWRITE", "INSERT_ROWS"],
             "type": ["", "video", "channel", "playlist"],
             "order": ["date", "rating", "relevance", "title", "videoCount", "viewCount"],
