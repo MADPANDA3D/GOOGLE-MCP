@@ -270,9 +270,7 @@ def test_mime_type_enum_is_scoped_to_slides_thumbnail_tool():
     by_name = {item["nativeToolName"]: item for item in gm._current_tool_manifest()["tools"]}
 
     drive_mime = by_name["drive_upload_file"]["inputSchema"]["properties"]["mime_type"]
-    slides_mime = by_name["slides_get_page_thumbnail"]["inputSchema"]["properties"][
-        "mime_type"
-    ]
+    slides_mime = by_name["slides_get_page_thumbnail"]["inputSchema"]["properties"]["mime_type"]
 
     assert drive_mime["type"] == "string"
     assert drive_mime["default"] == "text/plain"
