@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 SCHEMA_VERSION = "1.0.0"
 SERVICE_ID = "google"
-CATALOG_VERSION = "google-2026.10.26.1"
+CATALOG_VERSION = "google-2026.11.24.1"
 DOCUMENTATION_URL = "https://github.com/MADPANDA3D/GOOGLE-MCP#readme"
 
 STANDARD_NAVIGATION_TOOLS = frozenset(

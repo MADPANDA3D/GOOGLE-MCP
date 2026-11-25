@@ -89,3 +89,11 @@ files = ["fastmcp", "scripts"]
 [tool.bandit]
 exclude_dirs = ["fastmcp/tests"]
 skips = ["B104"]
+
+[[tool.uv.dependency-metadata]]
+# dkimpy 1.1.8 publishes only an sdist and does not expose static core metadata
+# on PyPI. Keep its known runtime dependency available to wheel-only lock
+# refreshes so uv does not need to execute the package build backend to resolve.
+name = "dkimpy"
+version = "1.1.8"
+requires-dist = ["dnspython>=2.0.0"]

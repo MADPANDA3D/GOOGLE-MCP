@@ -6,7 +6,7 @@
 |---|---|
 | Schema version | `1.0.0` |
 | Service ID | `google` |
-| Catalog version | `google-2026.10.26.1` |
+| Catalog version | `google-2026.11.24.1` |
 | Native tools | 153 |
 | Descriptor hash | Runtime-generated from the ordered descriptors |
 

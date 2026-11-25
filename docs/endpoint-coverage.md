@@ -1,7 +1,7 @@
 # Google MCP Endpoint Coverage
 
-- Reviewed: 2026-10-17
-- Catalog: `google-2026.10.26.1`
+- Reviewed: 2026-11-24
+- Catalog: `google-2026.11.24.1`
 - Native MCP tools: **153**
 
 This ledger describes the curated public wrappers in v1.0.0. It does not claim

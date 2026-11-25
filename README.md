@@ -32,7 +32,7 @@ MADPANDA3D Google MCP exposes exactly **153 native MCP tools**:
   families—including the hidden Gmail signature preflight—plus four
   compatibility navigation entries, one configuration diagnostic, and one
   hidden advanced-read tool.
-- ToolManifest catalog `google-2026.10.26.1` classifies the complete surface
+- ToolManifest catalog `google-2026.11.24.1` classifies the complete surface
   as **146 agent-ready**, **five legacy**, and **two hidden**.
 - Manifest risk classes contain **85 read**, **18 write**, and **50
   destructive or billable** tools. Every descriptor includes input/output

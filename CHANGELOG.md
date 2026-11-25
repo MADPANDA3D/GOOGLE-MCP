@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Scoped the Slides thumbnail `mime_type` enum to `slides_get_page_thumbnail`
+  so Drive uploads accept standard MIME types such as `video/mp4`.
+- Advanced the provider catalog to `google-2026.11.24.1` without changing tool
+  identities, risk classes, or confirmation behavior.
+
 ## 2026-10-26
 
 - Added agent-ready Gmail one-click unsubscribe preview and confirmed execution tools.
@@ -8,7 +15,7 @@
 
 All notable public releases are documented here.
 
-## Unreleased
+## 2026-10-17
 
 - Added optional conference data, conference data version, and attendee update
   delivery controls to `calendar_create_event`.
